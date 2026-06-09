@@ -1,0 +1,11 @@
+{
+  "name": "shed-forge",
+  "version": "1.0.0",
+  "description": "Online shed builder with a game-engine style editor and a full build-report engine",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/engine.test.mjs",
+    "start": "python3 -m http.server 8080"
+  },
+  "license": "MIT"
+}
