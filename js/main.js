@@ -8,6 +8,7 @@ import {
 import { PALETTE, WALL_PIECES, ROOF_KINDS, FIXTURES } from './catalog.js';
 import { REGIONS } from './codes.js';
 import { buildReport, money } from './engine.js';
+import { electricalDesign, plumbingDesign } from './systems.js';
 import { renderReport } from './report.js';
 import { Editor3D } from './editor3d.js';
 import { Editor2D } from './editor2d.js';
@@ -183,6 +184,11 @@ class App {
   refresh() {
     localStorage.setItem('shedforge', serialize(this.state));
     $('save-state').textContent = 'saved';
+    // cache the system routing once per state change; both viewports read it
+    this.designs = {
+      elec: electricalDesign(this.state),
+      plumb: plumbingDesign(this.state),
+    };
     this.ed3d.rebuild(this.state, this.stressView ? computeSupport(this.state) : null);
     this.ed2d.draw();
     this.updateStats();

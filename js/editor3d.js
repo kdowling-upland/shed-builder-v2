@@ -95,6 +95,11 @@ export class Editor3D {
     this.ghost = null;
     this.hover = null;
     this.mouse = new THREE.Vector2();
+    // perf: one shared unit cube, scaled per mesh (BoxGeometry UVs are 0–1
+    // regardless of size, so this renders identically with zero allocations)
+    this.unitBox = new THREE.BoxGeometry(1, 1, 1);
+    this.customGeos = [];      // gable/floor geometries needing disposal
+    this.tintCache = new Map();
     this.painting = false;
     this.erasing = false;
     this.lastSlot = null;
@@ -107,12 +112,19 @@ export class Editor3D {
     canvas.addEventListener('contextmenu', e => e.preventDefault());
     canvas.addEventListener('pointerleave', () => { this.hover = null; this.updateGhost(); });
 
+    // render on demand: only when the camera, scene or an animation changes
+    this.needsRender = true;
+    this.controls.addEventListener('change', () => { this.needsRender = true; });
+
     this.resize();
     const loop = () => {
       const dt = Math.min(this.clock.getDelta(), 0.05);
-      this.stepFalling(dt);
+      if (this.falling.length) { this.stepFalling(dt); this.needsRender = true; }
       this.controls.update();
-      this.renderer.render(this.scene, this.camera);
+      if (this.needsRender) {
+        this.needsRender = false;
+        this.renderer.render(this.scene, this.camera);
+      }
       requestAnimationFrame(loop);
     };
     loop();
@@ -130,16 +142,22 @@ export class Editor3D {
     this.renderer.setSize(r.width, r.height, false);
     this.camera.aspect = r.width / r.height;
     this.camera.updateProjectionMatrix();
+    this.needsRender = true;
   }
 
   // ---------- scene rebuild ----------
   rebuild(state, support) {
+    for (const g of this.customGeos) g.dispose();
+    this.customGeos.length = 0;
     this.pieceGroup.clear();
     const stress = this.app.stressView && support;
     const tint = (v) => {
-      const c = new THREE.Color();
-      c.setHSL(THREE.MathUtils.clamp(v, 0, 1) * 0.33, 0.85, 0.5);
-      return new THREE.MeshLambertMaterial({ color: c });
+      const key = Math.round(THREE.MathUtils.clamp(v, 0, 1) * 20);
+      if (!this.tintCache.has(key)) {
+        const c = new THREE.Color().setHSL((key / 20) * 0.33, 0.85, 0.5);
+        this.tintCache.set(key, new THREE.MeshLambertMaterial({ color: c }));
+      }
+      return this.tintCache.get(key);
     };
 
     for (const f of Object.values(state.floors)) {
@@ -160,6 +178,7 @@ export class Editor3D {
     }
     if (!stress) { this.addCornerBoards(state); this.addPorchPosts(state); }
     this.buildSystems3D(state);
+    this.needsRender = true;
     for (const [k, r] of Object.entries(state.roofs)) {
       const g = stress
         ? this.roofSlab(r, tint(support.roofs[k] ?? 0))
@@ -181,7 +200,8 @@ export class Editor3D {
   }
 
   box(w, h, d, mat) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    const m = new THREE.Mesh(this.unitBox, mat);
+    m.scale.set(w, h, d);
     m.castShadow = m.receiveShadow = true;
     return m;
   }
@@ -214,6 +234,7 @@ export class Editor3D {
     shape.lineTo(pts[1][0], -pts[1][1]);
     shape.lineTo(pts[2][0], -pts[2][1]);
     const geo = new THREE.ExtrudeGeometry(shape, { depth: Y0 - 0.46, bevelEnabled: false });
+    this.customGeos.push(geo);
     const m = new THREE.Mesh(geo, [this.M.deck, this.M.lumber]);
     m.rotation.x = -Math.PI / 2;
     m.position.y = Y0;
@@ -283,6 +304,7 @@ export class Editor3D {
   // 3D wiring & plumbing runs (axis-aligned tubes), gated by the layer toggles
   buildSystems3D(state) {
     this.sysGroup.clear();
+    this.needsRender = true;
     const seg = (x1, y1, z1, x2, y2, z2, r, mat) => {
       const m = this.box(Math.abs(x2 - x1) + r, Math.abs(y2 - y1) + r, Math.abs(z2 - z1) + r, mat);
       m.position.set((x1 + x2) / 2, (y1 + y2) / 2, (z1 + z2) / 2);
@@ -292,7 +314,7 @@ export class Editor3D {
     const devY = { outlet: 1.33, switch: 4, extLight: 6.9, light: 7.3, panel: 4.6, sink: 2.3, hosebib: 1.5 };
     const layers = this.app.layers2d;
     if (layers.elec) {
-      const e = electricalDesign(state);
+      const e = this.app.designs?.elec || electricalDesign(state);
       const hY = Y0 + 7.45;
       for (const r of e.routes) {
         const [a, m, b] = r.path;
@@ -303,7 +325,7 @@ export class Editor3D {
       }
     }
     if (layers.plumb) {
-      const p = plumbingDesign(state);
+      const p = this.app.designs?.plumb || plumbingDesign(state);
       const hY = Y0 + 0.24;
       for (const r of p.routes) {
         const [a, m, b] = r.path;
@@ -572,6 +594,7 @@ export class Editor3D {
     if (fx) verts.push(fx[0], y0, planeZ, fx[1], y0, planeZ, fx[1], y1, planeZ);
     else verts.push(planeX, y0, fz[0], planeX, y0, fz[1], planeX, y1, fz[1]);
     const geo = new THREE.BufferGeometry();
+    this.customGeos.push(geo);
     geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1], 2));
     geo.computeVertexNormals();
@@ -745,6 +768,7 @@ export class Editor3D {
   }
 
   updateGhost() {
+    this.needsRender = true;
     if (this.ghost) { this.scene.remove(this.ghost); this.ghost = null; }
     const h = this.hover;
     if (!h || h.kind === 'erase') return;

@@ -102,12 +102,18 @@ export class Editor2D {
     }
   }
 
+  // coalesce hover/pan redraws to one per animation frame
+  requestDraw() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => { this._raf = null; this.draw(); });
+  }
+
   onMove(e) {
     if (this.panning) {
       this.origin.x += e.clientX - this.panning.x;
       this.origin.y += e.clientY - this.panning.y;
       this.panning = { x: e.clientX, y: e.clientY };
-      this.draw();
+      this.requestDraw();
       return;
     }
     const w = this.toWorld(e);
@@ -123,7 +129,7 @@ export class Editor2D {
       const slot = candidateSlot(this.hover);
       if (slot !== this.lastSlot) { this.app.applyCandidate(this.hover); this.lastSlot = slot; }
     }
-    this.draw();
+    this.requestDraw();
   }
 
   // ---------- drawing ----------
@@ -194,8 +200,10 @@ export class Editor2D {
       }
     }
 
-    if (layers.elec) this.drawSystem(electricalDesign(state), '#ffd34d', '#ffb04d');
-    if (layers.plumb) this.drawSystem(plumbingDesign(state), '#5db4ff', '#6fe0c8');
+    // routing is cached per state change in the app (recomputing it on
+    // every hover redraw was the main CPU cost of the plan view)
+    if (layers.elec) this.drawSystem(this.app.designs?.elec || electricalDesign(state), '#ffd34d', '#ffb04d');
+    if (layers.plumb) this.drawSystem(this.app.designs?.plumb || plumbingDesign(state), '#5db4ff', '#6fe0c8');
 
     // fixtures symbols
     for (const f of Object.values(state.fixtures)) {
