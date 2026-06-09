@@ -1,19 +1,23 @@
 // engine.js — the calculation backend. Takes the placed-piece state and
 // produces a full bill of materials, an itemized cost estimate, a cut list,
-// a nail schedule and an optimized step-by-step build guide.
+// a nail schedule, a code check and an optimized step-by-step build guide.
 // Pure JS (no DOM) so it runs in the browser and under node for tests.
 
 import {
-  CELL, DIRS, DIR_NAMES,
+  CELL, WALL_H, FLOOR_TOP, DIRS, DIR_NAMES, riseOf,
   floorKey, roofKey, wallKey,
   lowEdgeOfRoof, highEdgeOfRoof, roofHeights, bounds, perimeterEdges,
   gableTriangles,
 } from './store.js';
-import { PRICE, NAILS, STOCK_2X4, STOCK_2X6, STOCK_SKID } from './catalog.js';
+import {
+  PRICE, NAILS, STOCK_2X4, STOCK_2X6, STOCK_SKID, WALL_PIECES, ROOF_KINDS, FIXTURES,
+} from './catalog.js';
+import { electricalDesign, plumbingDesign } from './systems.js';
+import { runCodeChecks } from './codes.js';
 
-const SLOPE = Math.SQRT2 * CELL;          // slope length of one roof panel (ft)
 const STUD_SPACING = 16;                  // inches o.c.
 const RAFTER_SPACING = 24;                // inches o.c.
+const slopeFactor = (kind) => Math.hypot(CELL, riseOf(kind)) / CELL;
 
 // ---------- formatting helpers ----------
 
@@ -21,7 +25,6 @@ export function money(n) {
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// inches → `92-5/8″` style string
 export function inches(v) {
   const whole = Math.floor(v + 1e-9);
   const frac = Math.round((v - whole) * 8);
@@ -32,7 +35,6 @@ export function inches(v) {
 }
 function gcd(a, b) { return b ? gcd(b, a % b) : a; }
 
-// feet (float) → `5′ 7-7/8″`
 export function ftIn(ft) {
   const totalIn = ft * 12;
   const f = Math.floor(totalIn / 12);
@@ -42,8 +44,6 @@ export function ftIn(ft) {
 }
 
 // ---------- cut packing (first-fit-decreasing onto stock lengths) ----------
-// cuts: [{len(ft), label}]  stocks: [{len, sku}] longest→shortest
-// Returns { bins:[{sku,stockLen,pieces,waste}], buy:{sku:qty} }
 // kerf is 0 because dimensional lumber runs slightly over nominal length,
 // so exact-fit cuts (two 8s from a 16) are standard practice.
 export function packCuts(cuts, stocks, kerf = 0) {
@@ -52,7 +52,6 @@ export function packCuts(cuts, stocks, kerf = 0) {
   const bins = [];
   for (const cut of sorted) {
     if (cut.len > maxLen + 1e-9) {
-      // split over-length runs into max-stock chunks + remainder
       let rest = cut.len, idx = 1;
       const parts = [];
       while (rest > 1e-9) {
@@ -71,12 +70,10 @@ export function packCuts(cuts, stocks, kerf = 0) {
       }
     }
     if (!placed) {
-      // open the smallest stock that fits this cut
       const opt = [...stocks].reverse().find(s => s.len >= cut.len - 1e-9) || stocks[0];
       bins.push({ sku: opt.sku, stockLen: opt.len, used: cut.len + kerf, pieces: [cut] });
     }
   }
-  // shrink each bin to the smallest stock that still fits its contents
   for (const b of bins) {
     const opt = [...stocks].reverse().find(s => s.len >= b.used - kerf - 1e-9);
     if (opt) { b.sku = opt.sku; b.stockLen = opt.len; }
@@ -89,7 +86,6 @@ export function packCuts(cuts, stocks, kerf = 0) {
 
 // ---------- geometry analysis ----------
 
-// Group wall edges into straight runs of contiguous panels.
 function wallRuns(state) {
   const walls = Object.values(state.walls);
   const runs = [];
@@ -112,13 +108,12 @@ function wallRuns(state) {
   for (const r of runs) {
     r.lenFt = r.walls.length * CELL;
     r.openings = r.walls
-      .map((w, idx) => ({ type: w.type, module: idx }))
-      .filter(x => x.type !== 'solid');
+      .map((w, idx) => ({ type: w.type, module: idx, spec: WALL_PIECES[w.type] }))
+      .filter(x => x.spec.cls !== 'solid');
   }
   return runs;
 }
 
-// Human label for a run (which side of the shed it sits on)
 function labelRuns(runs, state) {
   const b = bounds(state);
   const counters = {};
@@ -129,7 +124,6 @@ function labelRuns(runs, state) {
     counters[side] = (counters[side] || 0) + 1;
     r.label = counters[side] > 1 ? `${side} wall ${counters[side]}` : `${side} wall`;
   }
-  // longest walls first → frame the big walls first (most efficient raise order)
   runs.sort((a, b) => b.lenFt - a.lenFt);
 }
 
@@ -145,7 +139,6 @@ function countCorners(runs) {
   return n;
 }
 
-// Decompose floor cells into rectangles (greedy row bands) for skid/joist layout.
 function floorRects(state) {
   const cells = new Set(Object.keys(state.floors));
   const rects = [];
@@ -164,12 +157,11 @@ function floorRects(state) {
       h++;
     }
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) taken.add(floorKey(c.i + x, c.j + y));
-    rects.push({ i: c.i, j: c.j, w, h, L: w * CELL, D: h * CELL }); // L along x, D along z
+    rects.push({ i: c.i, j: c.j, w, h, L: w * CELL, D: h * CELL });
   }
   return rects;
 }
 
-// Group roof panels into faces (same slope direction, connected)
 function roofFaces(state) {
   const panels = Object.values(state.roofs);
   const seen = new Set();
@@ -177,7 +169,7 @@ function roofFaces(state) {
   for (const p of panels) {
     const k0 = roofKey(p.i, p.j, p.t);
     if (seen.has(k0)) continue;
-    const face = { dir: p.dir, panels: [] };
+    const face = { dir: p.dir, kind: p.kind, panels: [] };
     const queue = [p];
     seen.add(k0);
     while (queue.length) {
@@ -185,49 +177,73 @@ function roofFaces(state) {
       face.panels.push(cur);
       const d = DIRS[cur.dir];
       const nbrs = [
-        { i: cur.i + d.dx, j: cur.j + d.dz, t: cur.t + 1 }, // uphill
-        { i: cur.i - d.dx, j: cur.j - d.dz, t: cur.t - 1 }, // downhill
+        { i: cur.i + d.dx, j: cur.j + d.dz, t: cur.t + 1 },
+        { i: cur.i - d.dx, j: cur.j - d.dz, t: cur.t - 1 },
         { i: cur.i + DIRS[(cur.dir + 1) % 4].dx, j: cur.j + DIRS[(cur.dir + 1) % 4].dz, t: cur.t },
         { i: cur.i + DIRS[(cur.dir + 3) % 4].dx, j: cur.j + DIRS[(cur.dir + 3) % 4].dz, t: cur.t },
       ];
       for (const n of nbrs) {
         const k = roofKey(n.i, n.j, n.t);
         const rp = state.roofs[k];
-        if (rp && rp.dir === cur.dir && !seen.has(k)) { seen.add(k); queue.push(rp); }
+        if (rp && rp.dir === cur.dir && rp.kind === cur.kind && !seen.has(k)) {
+          seen.add(k); queue.push(rp);
+        }
       }
     }
-    // columns: group by cross-slope position → chain length per column
     const cols = {};
     for (const pp of face.panels) {
       const cross = (face.dir === 1 || face.dir === 3) ? pp.j : pp.i;
       (cols[cross] = cols[cross] || []).push(pp);
     }
+    const sf = slopeFactor(face.kind);
     face.columns = Object.values(cols).map(col => ({
       panels: col.sort((a, b) => a.t - b.t),
       chainLen: col.length,
-      slopeFt: col.length * SLOPE,
+      slopeFt: col.length * CELL * sf,
     }));
-    face.areaSlope = face.panels.length * CELL * SLOPE;
+    face.areaSlope = face.panels.length * CELL * CELL * sf;
     faces.push(face);
   }
   return faces;
 }
 
-// Ridge segments: top edges shared by two opposite-sloping panels at equal height
 function ridges(state) {
   const tops = {};
   for (const p of Object.values(state.roofs)) {
+    if (!ROOF_KINDS[p.kind].shingled) continue;
     const e = highEdgeOfRoof(p);
     const k = `${e.o},${e.i},${e.j}`;
     (tops[k] = tops[k] || []).push(p);
   }
   const segs = [];
   for (const [k, ps] of Object.entries(tops)) {
-    if (ps.length === 2 && (ps[0].dir + 2) % 4 === ps[1].dir && ps[0].t === ps[1].t) {
+    if (ps.length === 2 && (ps[0].dir + 2) % 4 === ps[1].dir
+        && ps[0].t === ps[1].t && ps[0].kind === ps[1].kind) {
       segs.push({ key: k, y: roofHeights(ps[0])[1] });
     }
   }
   return segs;
+}
+
+// per-opening framing parts, derived from the rough opening spec
+function openingParts(spec) {
+  const [roW, roH] = spec.ro;
+  if (spec.cls === 'vent') {
+    return { kings: 0, jacks: 0, removed: 0, blocks: 2, blockLen: roW, nails: 8 };
+  }
+  const removed = [16, 32].filter(x => x > 24 - roW / 2 && x < 24 + roW / 2).length;
+  const jackLen = spec.cls === 'door' ? roH - 1.5 : 81;
+  const headerLen = roW + 3;
+  const headCrip = 92.625 - (81 + 5.5);
+  const parts = {
+    kings: 2, jacks: 2, removed, jackLen, headerLen, headCrip, headCrips: 2, nails: 30,
+  };
+  if (spec.cls === 'window') {
+    parts.sillLen = roW;
+    parts.sillCrips = 3;
+    parts.sillCripLen = 82.5 - roH - 3;
+  }
+  return parts;
 }
 
 // ---------- main entry ----------
@@ -235,6 +251,7 @@ function ridges(state) {
 export function buildReport(state, opts = {}) {
   const taxRate = (opts.taxRate ?? 0) / 100;
   const waste = 1 + (opts.wastePct ?? 10) / 100;
+  const regionId = opts.region || 'irc';
 
   const floors = Object.values(state.floors);
   if (!floors.length) {
@@ -251,33 +268,36 @@ export function buildReport(state, opts = {}) {
   const faces = roofFaces(state);
   const ridgeSegs = ridges(state);
   const gables = gableTriangles(state);
-  const doors = Object.values(state.walls).filter(w => w.type === 'door').length;
-  const windows = Object.values(state.walls).filter(w => w.type === 'window').length;
+  const wallsByCls = (cls) => Object.values(state.walls).filter(w => WALL_PIECES[w.type].cls === cls);
+  const doors = wallsByCls('door');
+  const windows = wallsByCls('window');
+  const vents = wallsByCls('vent');
+  const fixtures = Object.values(state.fixtures || {});
+  const skylights = fixtures.filter(f => f.kind === 'skylight');
 
-  // --- warnings ---
   const missingWalls = perimeterEdges(state)
     .filter(e => !state.walls[wallKey(e.o, e.i, e.j)]).length;
   if (missingWalls) warnings.push(`${missingWalls} perimeter edge(s) have no wall — the shed is not fully enclosed.`);
   const roofCover = new Set(Object.values(state.roofs).map(r => floorKey(r.i, r.j)));
   const uncovered = floors.filter(c => !roofCover.has(floorKey(c.i, c.j))).length;
   if (uncovered) warnings.push(`${uncovered} floor module(s) have no roof panel above them.`);
-  if (!doors) warnings.push('No door placed — you may want a way in!');
+  if (!doors.length) warnings.push('No door placed — you may want a way in!');
   if (!faces.length) warnings.push('No roof panels placed.');
 
   // ============================================================
   // Quantity takeoff. Nail counts are accumulated per build step
   // so the totals always match the guide.
   // ============================================================
-  const nailTotals = {};      // type → count
+  const nailTotals = {};
   const addNails = (type, count) => { nailTotals[type] = (nailTotals[type] || 0) + Math.ceil(count); };
-  const supply = [];          // {sku?, desc, qty, unit, price, total, category}
+  const supply = [];
   const addItem = (sku, qty, category, descOverride) => {
     if (qty <= 0) return;
     const p = PRICE[sku];
     supply.push({ sku, desc: descOverride || p.desc, qty, unit: p.unit, price: p.price, total: qty * p.price, category });
   };
-  const cutPlans = [];        // {title, bins}
-  const phases = [];          // {name, steps:[{title,detail[],cuts[],nails[],materials[],minutes}]}
+  const cutPlans = [];
+  const phases = [];
   const phase = (name) => { const p = { name, steps: [] }; phases.push(p); return p; };
 
   // ---------------- PHASE 1 — layout ----------------
@@ -308,14 +328,12 @@ export function buildReport(state, opts = {}) {
   {
     const ph = phase('Foundation & floor framing');
     const skidCuts = [], joistCuts = [], rimCuts = [];
-    let joistTotal = 0, skidTotal = 0;
 
     for (const [ri, r] of rects.entries()) {
       const tag = rects.length > 1 ? ` (section ${ri + 1}: ${r.L}′×${r.D}′)` : '';
       const nSkids = Math.floor(r.D / CELL) + 1;
       const nJoists = Math.floor((r.L * 12) / STUD_SPACING) + 1;
-      const joistLenIn = r.D * 12 - 3; // sits between the two 1-1/2″ rim boards
-      skidTotal += nSkids; joistTotal += nJoists;
+      const joistLenIn = r.D * 12 - 3;
       for (let k = 0; k < nSkids; k++) skidCuts.push({ len: r.L, label: `skid${tag}` });
       for (let k = 0; k < 2; k++) rimCuts.push({ len: r.L, label: `rim joist${tag}` });
       for (let k = 0; k < nJoists; k++) joistCuts.push({ len: joistLenIn / 12, label: `floor joist ${inches(joistLenIn)}${tag}` });
@@ -327,7 +345,7 @@ export function buildReport(state, opts = {}) {
           `Place ${nSkids} pressure-treated 4×6 skids, each ${r.L}′ long, running the ${r.L}′ direction, spaced ${(r.D / (nSkids - 1)).toFixed(1)}′ apart on center.`,
           'Level each skid along its length and across to the others; shim with treated lumber offcuts, never bare ground contact.',
         ],
-        cuts: skidCuts.slice(-nSkids).map(c => `4×6 skid → ${ftIn(c.len)} (square cut)`),
+        cuts: [`4×6 skid → ${ftIn(r.L)} × ${nSkids} (square cut)`],
         tools: ['4′ level', 'circular saw'],
       });
 
@@ -382,7 +400,7 @@ export function buildReport(state, opts = {}) {
   }
 
   // ---------------- PHASE 3 — walls ----------------
-  const studCutPool = [];     // odd 2×4 cuts (jacks, cripples, sills, blocking)
+  const studCutPool = [];
   const plateCuts = [];
   const headerCuts = [];
   let precutStuds = 0;
@@ -390,39 +408,49 @@ export function buildReport(state, opts = {}) {
   {
     const ph = phase('Wall framing');
     if (runs.length) {
-      // batch-cut step first (efficiency: one saw setup for all walls)
-      let totStuds = 0;
       const perRun = runs.map(r => {
+        let removed = 0, kings = 0;
+        for (const o of r.openings) {
+          const p = openingParts(o.spec);
+          removed += p.removed; kings += p.kings;
+        }
         const grid = Math.floor((r.lenFt * 12) / STUD_SPACING) + 1;
-        const removed = r.openings.length * 2;
-        const kings = r.openings.length * 2;
-        return { run: r, grid, removed, kings, studs: grid - removed + kings };
+        return { run: r, grid, studs: grid - removed + kings };
       });
-      totStuds = perRun.reduce((s, x) => s + x.studs, 0) + corners * 2;
+      const totStuds = perRun.reduce((s, x) => s + x.studs, 0) + corners * 2;
       precutStuds = totStuds;
 
-      const nOpen = doors + windows;
-      for (let k = 0; k < nOpen * 2; k++) studCutPool.push({ len: 81 / 12, label: 'jack stud 81″' });
-      for (let k = 0; k < doors * 2 + windows * 2; k++) studCutPool.push({ len: 6.125 / 12, label: 'header cripple 6-1/8″' });
-      for (let k = 0; k < windows; k++) studCutPool.push({ len: 38 / 12, label: 'window sill 38″' });
-      for (let k = 0; k < windows * 3; k++) studCutPool.push({ len: 41.5 / 12, label: 'sill cripple 41-1/2″' });
-      for (let k = 0; k < nOpen * 2; k++) headerCuts.push({ len: 41 / 12, label: 'header ply 41″ (2×6)' });
+      // batch-cut all opening parts
+      const allOpenings = runs.flatMap(r => r.openings);
+      const batchCuts = [];
+      for (const o of allOpenings) {
+        const p = openingParts(o.spec);
+        if (o.spec.cls === 'vent') {
+          for (let k = 0; k < p.blocks; k++) studCutPool.push({ len: p.blockLen / 12, label: `vent block ${inches(p.blockLen)}` });
+          batchCuts.push(`2×4 vent block → ${inches(p.blockLen)} × ${p.blocks}`);
+          continue;
+        }
+        for (let k = 0; k < p.jacks; k++) studCutPool.push({ len: p.jackLen / 12, label: `jack stud ${inches(p.jackLen)}` });
+        for (let k = 0; k < 2; k++) headerCuts.push({ len: p.headerLen / 12, label: `header ply ${inches(p.headerLen)} (2×6)` });
+        for (let k = 0; k < p.headCrips; k++) studCutPool.push({ len: p.headCrip / 12, label: `header cripple ${inches(p.headCrip)}` });
+        if (p.sillLen) {
+          studCutPool.push({ len: p.sillLen / 12, label: `window sill ${inches(p.sillLen)}` });
+          for (let k = 0; k < p.sillCrips; k++) studCutPool.push({ len: p.sillCripLen / 12, label: `sill cripple ${inches(p.sillCripLen)}` });
+        }
+        batchCuts.push(`${o.spec.name}: 2 jacks @ ${inches(p.jackLen)}, 2 header plies @ ${inches(p.headerLen)} (2×6), 2 cripples @ ${inches(p.headCrip)}${p.sillLen ? `, sill @ ${inches(p.sillLen)} + ${p.sillCrips} sill cripples @ ${inches(p.sillCripLen)}` : ''}`);
+      }
 
       ph.steps.push({
         title: 'Batch-cut all wall parts',
         minutes: 40,
         detail: [
           `Wall studs are precut 92-5/8″ — no cutting needed for ${totStuds} studs.`,
-          `Cut all plates now (bottom + double top for every wall) — see the cut list for the exact pieces from each board.`,
-          nOpen ? `Cut opening parts in one batch: ${nOpen * 2} jack studs at 81″, ${nOpen * 2} header plies from 2×6 at 41″, ${(doors + windows) * 2} header cripples at 6-1/8″${windows ? `, ${windows} window sills at 38″ and ${windows * 3} sill cripples at 41-1/2″` : ''}.` : 'No door/window openings to cut parts for.',
-          'Cutting everything in one session keeps one saw setup and is the single biggest time saver in the build.',
+          'Cut all plates now (bottom + double top for every wall) — see the cut list for the exact pieces from each board.',
+          allOpenings.length
+            ? 'Cut every opening part in one session — one saw setup is the single biggest time saver in the build:'
+            : 'No openings to cut parts for.',
         ],
-        cuts: nOpen ? [
-          `2×4 jack stud → 81″ × ${nOpen * 2}`,
-          `2×6 header ply → 41″ × ${nOpen * 2}`,
-          `2×4 header cripple → 6-1/8″ × ${nOpen * 2}`,
-          ...(windows ? [`2×4 window sill → 38″ × ${windows}`, `2×4 sill cripple → 41-1/2″ × ${windows * 3}`] : []),
-        ] : [],
+        cuts: batchCuts,
         tools: ['miter saw or circular saw', 'speed square', 'pencil'],
       });
 
@@ -431,13 +459,13 @@ export function buildReport(state, opts = {}) {
         for (const part of ['bottom plate', 'top plate', 'cap plate']) {
           plateCuts.push({ len: r.lenFt, label: `${part} — ${r.label}` });
         }
-        const plateNails = pr.studs * 2 * 2;           // 2 nails per stud end, both plates
+        const plateNails = pr.studs * 2 * 2;
         const capNails = Math.ceil(r.lenFt * 12 / 16);
         const soleNails = Math.ceil(r.lenFt * 12 / 16);
-        const openNails = r.openings.length * 30;       // jacks, headers, cripples
+        const openNails = r.openings.reduce((s, o) => s + openingParts(o.spec).nails, 0);
         addNails('n16d', plateNails + capNails + soleNails + openNails);
         const openTxt = r.openings.map(o =>
-          `${o.type === 'door' ? '36″ door' : '36×36″ window'} rough opening (38″ wide) centered ${o.module * 4 + 2}′ from the ${runEndName(r)} end`).join('; ');
+          `${o.spec.name} rough opening (${inches(o.spec.ro[0])} × ${inches(o.spec.ro[1])}) centered ${o.module * 4 + 2}′ from the ${r.o === 'H' ? 'west' : 'north'} end`).join('; ');
         ph.steps.push({
           title: `Frame & raise the ${r.label} (${r.lenFt}′)`,
           minutes: 35 + r.openings.length * 20,
@@ -446,10 +474,10 @@ export function buildReport(state, opts = {}) {
             `Crown all studs the same way, then nail through the plates into each stud end with 2 × 16d — ${pr.studs} studs × 4 nails = ${plateNails} × 16d.`,
             ...(r.openings.length ? [
               `Openings: ${openTxt}.`,
-              `For each opening: king studs at both sides, 81″ jack studs nailed to kings (6 × 16d each), double 2×6 header on the jacks (4 × 16d per end per ply), cripples at 16″ o.c. above — about 30 × 16d per opening (${openNails} total).`,
+              `Door/window openings get king studs both sides, jack studs under a double 2×6 header (4 × 16d per end per ply), and cripples above; vents get two flat 2×4 blocks toenailed between studs — ${openNails} × 16d for this wall's openings.`,
             ] : []),
-            `Square the wall on the deck (diagonals equal), tack a temporary diagonal brace.`,
-            `Raise the wall, brace it plumb, then nail the bottom plate to the deck through the rim with 16d at 16″ o.c. — ${soleNails} × 16d.${r.openings.some(o => o.type === 'door') ? ' Leave the plate continuous across door openings for now.' : ''}`,
+            'Square the wall on the deck (diagonals equal), tack a temporary diagonal brace.',
+            `Raise the wall, brace it plumb, then nail the bottom plate to the deck through the rim with 16d at 16″ o.c. — ${soleNails} × 16d.${r.openings.some(o => o.spec.cls === 'door') ? ' Leave the plate continuous across door openings for now.' : ''}`,
             `Add the cap (second top) plate, overlapping corner joints, 16d at 16″ o.c. staggered — ${capNails} × 16d.`,
           ],
           cuts: [`2×4 plates → ${ftIn(r.lenFt)} × 3 (bottom, top, cap)`],
@@ -473,46 +501,46 @@ export function buildReport(state, opts = {}) {
         });
       }
 
-      // wall sheathing
       const runSheets = runs.reduce((s, r) => s + Math.ceil(r.lenFt / 4), 0);
       const gableArea = gables.reduce((s, g) => s + g.area, 0);
       const gableSheets = Math.ceil((gableArea / 32) * waste);
-      wallSheets = Math.ceil(runSheets * 1.0) + gableSheets;
+      wallSheets = runSheets + gableSheets;
       const shNails = (runSheets + gableSheets) * 60;
       addNails('n8d', shNails);
       addItem('osbWall', wallSheets, 'Sheathing');
+      const nOpenings = doors.length + windows.length + vents.length;
       ph.steps.push({
         title: 'Sheath the walls',
         minutes: 20 * runSheets / 4 + 30,
         detail: [
           `Hang ${runSheets} sheets of 7/16″ OSB vertically, flush with the bottom plate, edges landing on stud centers.`,
           `Nail 8d at 6″ o.c. on edges and 12″ in the field — about 60 nails per sheet, ${shNails} total (includes gable sheets).`,
-          ...(doors + windows ? [`Sheath right over the ${doors + windows} opening(s), then cut them out from inside with a reciprocating saw — faster and the cut lands exactly on the framing.`] : []),
+          ...(nOpenings ? [`Sheath right over the ${nOpenings} opening(s), then cut them out from inside with a reciprocating saw — faster, and the cut lands exactly on the framing.`] : []),
         ],
-        cuts: (doors + windows) ? [`7/16″ OSB → cut out ${doors + windows} rough opening(s) in place`] : [],
+        cuts: nOpenings ? [`7/16″ OSB → cut out ${nOpenings} rough opening(s) in place`] : [],
         nails: [`${shNails} × 8d common`],
         tools: ['framing hammer or nail gun', 'chalk line', 'reciprocating saw'],
       });
     }
-    const studPack = packCuts(studCutPool, STOCK_2X4);
     const platePack = packCuts(plateCuts, STOCK_2X4);
+    const openPack = packCuts(studCutPool, STOCK_2X4);
     const headerPack = packCuts(headerCuts, STOCK_2X6);
     if (precutStuds) addItem('stud2x4_925', precutStuds, 'Wall framing');
     for (const [sku, q] of Object.entries(platePack.buy)) addItem(sku, q, 'Wall framing');
-    for (const [sku, q] of Object.entries(studPack.buy)) addItem(sku, q, 'Wall framing');
+    for (const [sku, q] of Object.entries(openPack.buy)) addItem(sku, q, 'Wall framing');
     for (const [sku, q] of Object.entries(headerPack.buy)) addItem(sku, q, 'Wall framing');
     if (plateCuts.length) cutPlans.push({ title: 'Wall plates — 2×4', pack: platePack });
-    if (studCutPool.length) cutPlans.push({ title: 'Opening parts — 2×4', pack: studPack });
+    if (studCutPool.length) cutPlans.push({ title: 'Opening parts — 2×4', pack: openPack });
     if (headerCuts.length) cutPlans.push({ title: 'Headers — 2×6', pack: headerPack });
   }
 
   // ---------------- PHASE 4 — roof ----------------
-  let roofSheets = 0, bundles = 0, squares = 0;
+  let roofSheets = 0, bundles = 0, squares = 0, epdmArea = 0;
   {
     if (faces.length) {
       const ph = phase('Roof framing & roofing');
       const rafterCuts = [];
-      let totRafters = 0, ties = 0;
+      let ties = 0;
 
       const ridgeLF = ridgeSegs.length * CELL;
       if (ridgeLF) {
@@ -525,7 +553,7 @@ export function buildReport(state, opts = {}) {
           minutes: 30,
           detail: [
             `Cut the 2×8 ridge to ${ftIn(ridgeLF)} and mark rafter layout at ${RAFTER_SPACING}″ o.c. on both sides.`,
-            `Brace it temporarily at ridge height ${ftIn(ridgeSegs[0].y)} above the deck with 2×4 legs to the top plates.`,
+            `Brace it temporarily at ridge height ${ftIn(ridgeSegs[0].y + FLOOR_TOP)} above grade with 2×4 legs to the top plates.`,
           ],
           cuts: [`2×8 ridge → ${ftIn(ridgeLF)}`],
           tools: ['circular saw', 'clamps', '2 temporary 2×4 legs'],
@@ -536,37 +564,49 @@ export function buildReport(state, opts = {}) {
         const crossCells = f.columns.length;
         const nRaft = crossCells * 2 + 1;
         const slopeFt = Math.max(...f.columns.map(c => c.slopeFt));
-        totRafters += nRaft;
+        const flat = f.kind === 'flat';
+        for (let k = 0; k < nRaft; k++) {
+          rafterCuts.push({ len: slopeFt + 0.2, label: `${flat ? 'ceiling joist' : 'rafter'} — ${DIR_NAMES[f.dir]} face` });
+        }
         ties += nRaft;
-        for (let k = 0; k < nRaft; k++) rafterCuts.push({ len: slopeFt + 0.2, label: `rafter — ${DIR_NAMES[f.dir]} face` });
         const toe = nRaft * 3, tieNails = nRaft * 10, topNails = nRaft * 3;
         addNails('n16d', toe + topNails);
         addNails('hanger', tieNails);
+        const kindName = ROOF_KINDS[f.kind].name;
         ph.steps.push({
-          title: `Cut & set rafters — ${DIR_NAMES[f.dir]}-sloping face ${faces.length > 1 ? `(${fi + 1} of ${faces.length})` : ''}`,
+          title: flat
+            ? `Set the flat-roof joists ${faces.length > 1 ? `(face ${fi + 1} of ${faces.length})` : ''}`
+            : `Cut & set rafters — ${DIR_NAMES[f.dir]}-sloping face ${faces.length > 1 ? `(${fi + 1} of ${faces.length})` : ''}`,
           minutes: 20 + nRaft * 10,
           detail: [
-            `This face slopes up toward the ${DIR_NAMES[f.dir]} at 45° (12/12 pitch) and is ${crossCells * CELL}′ wide.`,
-            `Cut one pattern rafter from 2×6: overall ${ftIn(slopeFt + 0.2)}; 45° plumb cut at the top; birdsmouth with a 3-1/2″ seat cut at ${ftIn(slopeFt - 0.3)} down the rafter; test-fit, then trace ${nRaft - 1} more.`,
-            `Install ${nRaft} rafters at ${RAFTER_SPACING}″ o.c.: 3 × 16d at the top (into ridge or facing rafter) = ${topNails}, toenail the birdsmouth to the top plate with 3 × 16d = ${toe}.`,
-            `Add an H2.5A hurricane tie at every rafter seat — ${nRaft} ties × 10 hanger nails = ${tieNails} nails.`,
+            flat
+              ? `This ${crossCells * CELL}′-wide section gets level 2×6 joists with a slight 1″-per-bay slope toward the ${DIR_NAMES[f.dir]} for drainage (${kindName}).`
+              : `This face slopes up toward the ${DIR_NAMES[f.dir]} (${kindName}) and is ${crossCells * CELL}′ wide.`,
+            flat
+              ? `Cut ${nRaft} joists to ${ftIn(slopeFt + 0.2)} and set them at ${RAFTER_SPACING}″ o.c. across the walls.`
+              : `Cut one pattern rafter from 2×6: overall ${ftIn(slopeFt + 0.2)}; plumb cut at the top to match the pitch; birdsmouth with a 3-1/2″ seat cut at ${ftIn(slopeFt - 0.3)} down the rafter; test-fit, then trace ${nRaft - 1} more.`,
+            `Install ${nRaft} ${flat ? 'joists' : 'rafters'} at ${RAFTER_SPACING}″ o.c.: 3 × 16d at the top (into ridge or facing member) = ${topNails}, toenail the seat to the top plate with 3 × 16d = ${toe}.`,
+            `Add an H2.5A hurricane tie at every seat — ${nRaft} ties × 10 hanger nails = ${tieNails} nails.`,
           ],
-          cuts: [`2×6 rafter → ${ftIn(slopeFt + 0.2)} with 45° plumb cut + birdsmouth (3-1/2″ seat) × ${nRaft}`],
+          cuts: [flat
+            ? `2×6 joist → ${ftIn(slopeFt + 0.2)} × ${nRaft} (square cuts)`
+            : `2×6 rafter → ${ftIn(slopeFt + 0.2)} with plumb cut + birdsmouth (3-1/2″ seat) × ${nRaft}`],
           nails: [`${toe + topNails} × 16d common`, `${tieNails} × 1-1/2″ tie nails`],
           tools: ['circular saw', 'speed square', 'framing hammer'],
         });
       }
       const rafterPack = packCuts(rafterCuts, STOCK_2X6);
       for (const [sku, q] of Object.entries(rafterPack.buy)) addItem(sku, q, 'Roofing');
-      cutPlans.push({ title: 'Rafters — 2×6', pack: rafterPack });
+      cutPlans.push({ title: 'Rafters & roof joists — 2×6', pack: rafterPack });
       addItem('hTie', ties, 'Fasteners & hardware');
 
       // gable framing
       const gableArea = gables.reduce((s, g) => s + g.area, 0);
       if (gableArea) {
         const gableStuds = Math.ceil(gableArea / 4);
-        for (let k = 0; k < gableStuds; k++) studCutPool.push({ len: 2.5, label: 'gable stud (angle-cut)' });
-        const gablePack = packCuts(studCutPool.filter(c => c.label.startsWith('gable')), STOCK_2X4);
+        const gableCuts = [];
+        for (let k = 0; k < gableStuds; k++) gableCuts.push({ len: 2.5, label: 'gable stud (angle-cut)' });
+        const gablePack = packCuts(gableCuts, STOCK_2X4);
         for (const [sku, q] of Object.entries(gablePack.buy)) addItem(sku, q, 'Wall framing');
         cutPlans.push({ title: 'Gable studs — 2×4', pack: gablePack });
         addNails('n16d', gableStuds * 4);
@@ -574,25 +614,48 @@ export function buildReport(state, opts = {}) {
           title: 'Frame & sheath the gable ends',
           minutes: 45,
           detail: [
-            `Fill the ${gables.length} triangular gable area(s) (${gableArea} sq ft total) with 2×4 studs at 16″ o.c., each top end cut at 45° to match the roof line — about ${gableStuds} studs, average 30″ long.`,
+            `Fill the ${gables.length} triangular gable area(s) (${gableArea} sq ft total) with 2×4 studs at 16″ o.c., each top end angle-cut to match the roof line — about ${gableStuds} studs, average 30″ long.`,
             `Toenail each gable stud with 4 × 16d (${gableStuds * 4} nails); sheathing was included in the wall-sheathing step.`,
           ],
-          cuts: [`2×4 gable stud → ~30″ with one 45° end × ${gableStuds}`],
+          cuts: [`2×4 gable stud → ~30″ with one angled end × ${gableStuds}`],
           nails: [`${gableStuds * 4} × 16d common`],
           tools: ['circular saw', 'speed square'],
         });
       }
 
-      // roof deck + roofing
+      // skylights (framed before decking)
+      if (skylights.length) {
+        addItem('skylight', skylights.length, 'Roofing');
+        const skNails = skylights.length * 24;
+        addNails('n16d', skNails);
+        addNails('roofing', skylights.length * 30);
+        ph.steps.push({
+          title: `Frame & curb ${skylights.length} skylight${skylights.length > 1 ? 's' : ''}`,
+          minutes: 60 * skylights.length,
+          detail: [
+            'Head off the opening between rafters with doubled 2×6 headers above and below (4 pieces @ 22-1/2″ per skylight, 6 × 16d per end).',
+            'Build a 2×6 curb (4 pieces @ 27″) and set the curb-mount unit on it after the underlayment goes down; step-flash all four sides (30 roofing nails per unit).',
+          ],
+          cuts: [`2×6 header/curb → 22-1/2″ × ${skylights.length * 4} and 27″ × ${skylights.length * 4}`],
+          nails: [`${skNails} × 16d common`, `${skylights.length * 30} × 1-1/4″ roofing nails`],
+          tools: ['circular saw', 'flashing kit', 'caulk gun'],
+        });
+      }
+
+      // roof deck + covering
+      const shingledFaces = faces.filter(f => ROOF_KINDS[f.kind].shingled);
+      const flatFaces = faces.filter(f => !ROOF_KINDS[f.kind].shingled);
       const slopeArea = faces.reduce((s, f) => s + f.areaSlope, 0);
+      const shingleArea = shingledFaces.reduce((s, f) => s + f.areaSlope, 0);
+      epdmArea = Math.ceil(flatFaces.reduce((s, f) => s + f.areaSlope, 0));
       roofSheets = Math.ceil((slopeArea / 32) * waste);
-      squares = slopeArea / 100;
+      squares = shingleArea / 100;
       bundles = Math.ceil(squares * 3 * waste);
-      const feltRolls = Math.max(1, Math.ceil((squares * waste) / 4));
+      const feltRolls = shingleArea ? Math.max(1, Math.ceil((squares * waste) / 4)) : 0;
       const eaveLF = Object.values(state.roofs)
         .filter(r => r.t === 0 && state.walls[wallKey(lowEdgeOfRoof(r).o, lowEdgeOfRoof(r).i, lowEdgeOfRoof(r).j)])
         .length * CELL;
-      const rakeLF = Math.ceil(gables.length * SLOPE);
+      const rakeLF = Math.ceil(gables.reduce((s, g) => s + CELL * slopeFactor(g.roof.kind), 0));
       const dripPieces = Math.ceil((eaveLF + rakeLF) / 10);
       const capBoxes = ridgeSegs.length ? Math.ceil((ridgeSegs.length * CELL) / 33) : 0;
       const deckN = roofSheets * 60;
@@ -601,13 +664,8 @@ export function buildReport(state, opts = {}) {
       const capN = ridgeSegs.length * CELL * 2;
       const dripN = dripPieces * 10;
       addNails('n8d', deckN);
-      addNails('roofing', feltN + shingleN + capN + dripN);
       addItem('osbRoof', roofSheets, 'Roofing');
-      addItem('felt', feltRolls, 'Roofing');
-      addItem('shingleBundle', bundles, 'Roofing');
-      if (capBoxes) addItem('ridgeCap', capBoxes, 'Roofing');
       if (dripPieces) addItem('dripEdge', dripPieces, 'Roofing');
-
       ph.steps.push({
         title: 'Deck the roof',
         minutes: 15 * roofSheets,
@@ -619,66 +677,115 @@ export function buildReport(state, opts = {}) {
         nails: [`${deckN} × 8d common`],
         tools: ['chalk line', 'framing hammer or nail gun'],
       });
-      ph.steps.push({
-        title: 'Felt, drip edge & shingles',
-        minutes: Math.ceil(squares * 90) + 40,
-        detail: [
-          `Install drip edge along the ${eaveLF}′ of eaves first (under felt), nailing every 12″ — ${dripPieces} ten-foot pieces.`,
-          `Roll out 15# felt (${feltRolls} roll${feltRolls > 1 ? 's' : ''}) horizontally from the eaves up, 2″ overlaps, cap-nail about 20 nails per square (${feltN}).`,
-          `Drip edge on the ${rakeLF}′ of rakes goes over the felt.`,
-          `Starter course at the eave, then shingle up with 5-5/8″ exposure. 4 roofing nails per shingle ≈ 312 per square: ${shingleN} nails for ${squares.toFixed(1)} square${squares >= 2 ? 's' : ''} (${bundles} bundles incl. waste).`,
-          ...(capBoxes ? [`Finish the ridge with cap shingles (${capBoxes} box${capBoxes > 1 ? 'es' : ''}), 2 nails per cap — ${capN} nails.`] : []),
-        ],
-        cuts: ['Shingles → trim flush at rakes with a hook-blade utility knife'],
-        nails: [`${feltN + shingleN + capN + dripN} × 1-1/4″ roofing nails`],
-        tools: ['utility knife (hook blade)', 'chalk line', 'roofing hammer'],
-      });
+      if (shingleArea) {
+        addNails('roofing', feltN + shingleN + capN + dripN);
+        addItem('felt', feltRolls, 'Roofing');
+        addItem('shingleBundle', bundles, 'Roofing');
+        if (capBoxes) addItem('ridgeCap', capBoxes, 'Roofing');
+        ph.steps.push({
+          title: 'Felt, drip edge & shingles',
+          minutes: Math.ceil(squares * 90) + 40,
+          detail: [
+            `Install drip edge along the ${eaveLF}′ of eaves first (under felt), nailing every 12″ — ${dripPieces} ten-foot pieces.`,
+            `Roll out 15# felt (${feltRolls} roll${feltRolls > 1 ? 's' : ''}) horizontally from the eaves up, 2″ overlaps, cap-nail about 20 nails per square (${feltN}).`,
+            `Drip edge on the ${rakeLF}′ of rakes goes over the felt.`,
+            `Starter course at the eave, then shingle up with 5-5/8″ exposure. 4 roofing nails per shingle ≈ 312 per square: ${shingleN} nails for ${squares.toFixed(1)} square${squares >= 2 ? 's' : ''} (${bundles} bundles incl. waste).`,
+            ...(capBoxes ? [`Finish the ridge with cap shingles (${capBoxes} box${capBoxes > 1 ? 'es' : ''}), 2 nails per cap — ${capN} nails.`] : []),
+          ],
+          cuts: ['Shingles → trim flush at rakes with a hook-blade utility knife'],
+          nails: [`${feltN + shingleN + capN + dripN} × 1-1/4″ roofing nails`],
+          tools: ['utility knife (hook blade)', 'chalk line', 'roofing hammer'],
+        });
+      }
+      if (epdmArea) {
+        const epdmGal = Math.max(1, Math.ceil(epdmArea / 150));
+        addItem('epdm', Math.ceil(epdmArea * 1.15), 'Roofing');
+        addItem('epdmAdhesive', epdmGal, 'Roofing');
+        ph.steps.push({
+          title: 'EPDM membrane on the flat section',
+          minutes: 20 + Math.ceil(epdmArea / 30) * 10,
+          detail: [
+            `Sweep the ${epdmArea} sq ft flat deck clean, dry-fit the membrane with 6″ of overhang all around, then fold back half and roll on bonding adhesive (${epdmGal} gal).`,
+            'Lay the membrane into the wet adhesive, sweep out from the center, repeat for the other half; terminate the edges under the drip edge with lap sealant.',
+          ],
+          tools: ['paint roller', 'push broom', 'lap sealant gun'],
+        });
+      }
     }
   }
 
-  // ---------------- PHASE 5 — doors, windows, trim ----------------
+  // ---------------- PHASE 5/6 — systems ----------------
+  const elec = electricalDesign(state);
+  const plumb = plumbingDesign(state);
+  warnings.push(...elec.warnings, ...plumb.warnings);
+  if (elec.steps.length) {
+    const ph = phase('Electrical rough-in & finish');
+    ph.steps.push(...elec.steps);
+    for (const it of elec.items) addItem(it.sku, it.qty, 'Electrical');
+  }
+  if (plumb.steps.length) {
+    const ph = phase('Plumbing');
+    ph.steps.push(...plumb.steps);
+    for (const it of plumb.items) addItem(it.sku, it.qty, 'Plumbing');
+  }
+
+  // ---------------- PHASE 7 — doors, windows, trim ----------------
   {
     const ph = phase('Doors, windows & finishing');
-    if (doors) addItem('doorPrehung', doors, 'Doors & windows');
-    if (windows) addItem('windowUnit', windows, 'Doors & windows');
-    if (doors) {
-      addNails('finish', doors * 12);
+    for (const d of doors) addItem(WALL_PIECES[d.type].unitSku, 1, 'Doors & windows');
+    for (const w of windows) addItem(WALL_PIECES[w.type].unitSku, 1, 'Doors & windows');
+    for (const v of vents) addItem(WALL_PIECES[v.type].unitSku, 1, 'Doors & windows');
+    if (doors.length) {
+      addNails('finish', doors.length * 12);
+      const hasBarn = doors.some(d => d.type === 'doorBarn');
       ph.steps.push({
-        title: `Install ${doors} prehung door${doors > 1 ? 's' : ''}`,
-        minutes: 45 * doors,
+        title: `Install ${doors.length} door${doors.length > 1 ? 's' : ''}`,
+        minutes: 45 * doors.length,
         detail: [
-          'Cut the bottom plate out of the door opening flush with the jack studs (2 cuts with a reciprocating saw).',
-          'Set the unit in the opening, shim at hinges and latch until plumb and an even reveal, then fasten through the jamb and shims with 12 × 8d finish nails (or 3″ screws through the hinges).',
+          'Cut the bottom plate out of each door opening flush with the jack studs (2 cuts with a reciprocating saw).',
+          'Prehung/dutch units: set in the opening, shim at hinges and latch until plumb with an even reveal, fasten through the jamb and shims with 12 × 8d finish nails (or 3″ screws through the hinges).',
+          ...(hasBarn ? ['Barn door: lag the rail into the header through the sheathing (level it!), hang the door on its trolleys, then set the floor guide and end stops.'] : []),
         ],
-        cuts: ['2×4 bottom plate → remove 38″ section at each door (2 saw cuts)'],
-        nails: [`${doors * 12} × 8d finish`],
-        tools: ['reciprocating saw', 'shims', '4′ level'],
+        cuts: [`2×4 bottom plate → remove the opening width at each door (${doors.length * 2} saw cuts)`],
+        nails: [`${doors.length * 12} × 8d finish`],
+        tools: ['reciprocating saw', 'shims', '4′ level', ...(hasBarn ? ['socket wrench for lags'] : [])],
       });
     }
-    if (windows) {
-      addNails('roofing', windows * 16);
+    if (windows.length) {
+      addNails('roofing', windows.length * 16);
       ph.steps.push({
-        title: `Install ${windows} window${windows > 1 ? 's' : ''}`,
-        minutes: 30 * windows,
+        title: `Install ${windows.length} window${windows.length > 1 ? 's' : ''}`,
+        minutes: 30 * windows.length,
         detail: [
-          'Dry-fit each window, then run a bead of caulk around the opening flange area.',
+          'Dry-fit each unit, then run a bead of caulk around the opening flange area.',
           'Set, square (equal diagonals), and fasten the nailing flange with 1-1/4″ roofing nails every 8″ — about 16 per window.',
         ],
-        nails: [`${windows * 16} × 1-1/4″ roofing nails (flanges)`],
+        nails: [`${windows.length * 16} × 1-1/4″ roofing nails (flanges)`],
         tools: ['caulk gun', '4′ level'],
       });
     }
-    // trim & paint
+    if (vents.length) {
+      addNails('finish', vents.length * 6);
+      ph.steps.push({
+        title: `Install ${vents.length} wall vent${vents.length > 1 ? 's' : ''}`,
+        minutes: 15 * vents.length,
+        detail: [
+          'Set each louver in its blocked opening, bed the flange in caulk, and fasten with 6 finish nails; screen side in.',
+        ],
+        nails: [`${vents.length * 6} × 8d finish`],
+        tools: ['caulk gun', 'hammer'],
+      });
+    }
     const cornerTrim = corners * 2;
     const eaveLF2 = Object.values(state.roofs).filter(r => r.t === 0).length * CELL;
-    const rakeLF2 = Math.ceil(gables.length * SLOPE);
+    const rakeLF2 = Math.ceil(gables.reduce((s, g) => s + CELL * slopeFactor(g.roof.kind), 0));
     const fasciaPieces = Math.ceil((eaveLF2 + rakeLF2) / 12);
-    const paintArea = (wallSheets * 32) * 2; // two coats
+    const paintArea = (wallSheets * 32) * 2;
     const paintGal = Math.max(1, Math.ceil(paintArea / 300));
     if (cornerTrim) addItem('trim1x4x8', cornerTrim, 'Trim & finish');
     if (fasciaPieces) addItem('fascia1x6x12', fasciaPieces, 'Trim & finish');
     addItem('paintGal', paintGal, 'Trim & finish');
-    addItem('caulk', Math.max(1, Math.ceil((doors + windows + corners) / 2)), 'Trim & finish');
+    addItem('caulk', Math.max(1, Math.ceil((doors.length + windows.length + corners) / 2)), 'Trim & finish');
     const trimNails = cornerTrim * 8 + fasciaPieces * 10;
     if (trimNails) addNails('finish', trimNails);
     ph.steps.push({
@@ -687,7 +794,7 @@ export function buildReport(state, opts = {}) {
       detail: [
         ...(cornerTrim ? [`Nail 1×4 corner boards (${cornerTrim} pieces, 8 finish nails each).`] : []),
         ...(fasciaPieces ? [`Fasten 1×6 fascia to the rafter tails and rakes — about ${eaveLF2 + rakeLF2}′ (${fasciaPieces} boards, 10 finish nails each).`] : []),
-        'Caulk every trim joint, sheathing seam, and around the door/window.',
+        'Caulk every trim joint, sheathing seam, and around the doors/windows.',
         `Prime-and-paint with 2 coats — about ${paintGal} gallon${paintGal > 1 ? 's' : ''} for ${wallSheets * 32} sq ft of wall.`,
       ],
       nails: trimNails ? [`${trimNails} × 8d finish`] : [],
@@ -719,8 +826,8 @@ export function buildReport(state, opts = {}) {
   }
 
   // ---------------- cost rollup ----------------
-  const catOrder =['Foundation & floor', 'Wall framing', 'Sheathing', 'Roofing',
-    'Doors & windows', 'Fasteners & hardware', 'Trim & finish'];
+  const catOrder = ['Foundation & floor', 'Wall framing', 'Sheathing', 'Roofing',
+    'Doors & windows', 'Electrical', 'Plumbing', 'Fasteners & hardware', 'Trim & finish'];
   const categories = catOrder
     .map(name => {
       const items = supply.filter(s => s.category === name);
@@ -733,6 +840,29 @@ export function buildReport(state, opts = {}) {
   const minutes = phases.reduce((s, p) => s + p.steps.reduce((q, st) => q + (st.minutes || 0), 0), 0);
   const nailGrand = Object.values(nailTotals).reduce((a, b) => a + b, 0);
 
+  // ---------------- code check ----------------
+  const peak = Object.values(state.roofs).reduce((m, r) => Math.max(m, roofHeights(r)[1]), WALL_H);
+  const codeCtx = {
+    area,
+    heightFt: peak + FLOOR_TOP,
+    doors: doors.length,
+    windows: windows.length,
+    vents: vents.length,
+    roofKinds: new Set(Object.values(state.roofs).map(r => r.kind)),
+    hasFlat: Object.values(state.roofs).some(r => r.kind === 'flat'),
+    skylights: skylights.length,
+    elec: {
+      any: fixtures.some(f => FIXTURES[f.kind].sys === 'elec'),
+      panel: fixtures.some(f => f.kind === 'panel'),
+      outlets: fixtures.filter(f => f.kind === 'outlet').length,
+    },
+    plumb: {
+      any: fixtures.some(f => FIXTURES[f.kind].sys === 'plumb'),
+      sinks: fixtures.filter(f => f.kind === 'sink').length,
+    },
+  };
+  const code = runCodeChecks(codeCtx, regionId);
+
   return {
     ok: true,
     warnings,
@@ -740,8 +870,12 @@ export function buildReport(state, opts = {}) {
       area, bboxW: b.w, bboxD: b.d,
       wallPanels: Object.keys(state.walls).length,
       roofPanels: Object.keys(state.roofs).length,
-      doors, windows, corners,
-      roofSquares: squares, nailGrand,
+      doors: doors.length, windows: windows.length, vents: vents.length,
+      corners, skylights: skylights.length,
+      elecDevices: elec.counts.devices || 0,
+      plumbFixtures: plumb.counts.fixtures || 0,
+      roofSquares: squares, epdmArea, nailGrand,
+      heightFt: codeCtx.heightFt,
     },
     phases,
     supply,
@@ -750,9 +884,7 @@ export function buildReport(state, opts = {}) {
     nails: Object.entries(nailTotals).map(([t, c]) => ({ type: t, desc: NAILS[t].desc, count: c })),
     cost: { subtotal, tax, taxRate: taxRate * 100, total, perSqft: total / area },
     minutes,
+    code,
+    systems: { elec: elec.counts, plumb: plumb.counts },
   };
-}
-
-function runEndName(r) {
-  return r.o === 'H' ? 'west' : 'north';
 }

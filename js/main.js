@@ -1,10 +1,12 @@
 // main.js — application shell: tool state, undo, persistence, UI wiring.
 import {
-  emptyState, demoShed, serialize, deserialize, DIR_NAMES,
-  placeFloor, placeWall, placeRoof, removeFloor, removeWall, removeRoof,
-  bounds,
+  emptyState, demoShed, serialize, deserialize, DIR_NAMES, bounds,
+  placeFloor, placeWall, placeRoof, placeFixture,
+  removeFloor, removeWall, removeRoof, removeFixture,
+  collapseUnsupported, computeSupport,
 } from './store.js';
-import { PIECES } from './catalog.js';
+import { PALETTE, WALL_PIECES, ROOF_KINDS, FIXTURES } from './catalog.js';
+import { REGIONS } from './codes.js';
 import { buildReport, money } from './engine.js';
 import { renderReport } from './report.js';
 import { Editor3D } from './editor3d.js';
@@ -18,6 +20,8 @@ class App {
     if (!Object.keys(this.state.floors).length) this.state = demoShed();
     this.tool = null;
     this.roofDir = 0;
+    this.stressView = false;
+    this.layers2d = { structure: true, elec: true, plumb: true };
     this.undoStack = [];
     this.report = null;
 
@@ -25,6 +29,7 @@ class App {
     this.ed2d = new Editor2D($('vp2d'), this);
 
     this.buildPalette();
+    this.buildRegionSelect();
     this.wireUI();
     this.refresh();
 
@@ -35,25 +40,40 @@ class App {
   // ---------- palette & tools ----------
   buildPalette() {
     const list = $('palette-list');
-    for (const p of PIECES) {
-      const b = document.createElement('button');
-      b.className = 'piece-btn';
-      b.dataset.tool = p.id;
-      b.innerHTML = `<span class="pi">${p.icon}</span><span><span class="pn">${p.name}</span><span class="pd">${p.desc}</span></span><span class="pk">${p.key}</span>`;
-      b.addEventListener('click', () => this.setTool(this.tool === p.id ? null : p.id));
-      list.appendChild(b);
+    for (const grp of PALETTE) {
+      const h = document.createElement('div');
+      h.className = 'palette-group';
+      h.textContent = grp.group;
+      list.appendChild(h);
+      for (const p of grp.items) {
+        const b = document.createElement('button');
+        b.className = 'piece-btn';
+        b.dataset.tool = p.id;
+        b.innerHTML = `<span class="pi">${p.icon}</span><span><span class="pn">${p.name}</span><span class="pd">${p.desc}</span></span>${p.key ? `<span class="pk">${p.key}</span>` : ''}`;
+        b.addEventListener('click', () => this.setTool(this.tool === p.id ? null : p.id));
+        list.appendChild(b);
+      }
     }
+  }
+
+  toolName(t) {
+    for (const grp of PALETTE) {
+      const p = grp.items.find(x => x.id === t);
+      if (p) return p.name;
+    }
+    return t;
   }
 
   setTool(t) {
     this.tool = t;
     document.querySelectorAll('.piece-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.tool === t));
-    const piece = PIECES.find(p => p.id === t);
-    $('status-tool').textContent = piece
-      ? `${piece.name} — LMB place, RMB remove${t === 'roof' ? `, R rotate (slope up: ${DIR_NAMES[this.roofDir]})` : ''}`
-      : 'No piece selected — orbit mode';
-    $('hint3d').textContent = piece ? `placing: ${piece.name}` : 'LMB drag to orbit';
+    const isRoof = t && t.startsWith('roof:');
+    $('status-tool').textContent = t
+      ? `${this.toolName(t)} — click or drag to place, right-click removes${isRoof ? `, R rotates (slope up: ${DIR_NAMES[this.roofDir]})` : ''}`
+      : 'No piece selected — drag to orbit';
+    $('hint3d').textContent = t ? `placing: ${this.toolName(t)}` : 'drag to orbit · wheel zooms';
+    this.ed3d.setToolMode(!!t);
     if (!t) { this.ed3d.hover = null; this.ed3d.updateGhost(); this.ed2d.hover = null; this.ed2d.draw(); }
   }
 
@@ -64,10 +84,14 @@ class App {
     let changed = false;
     if (c.kind === 'floor') changed = placeFloor(this.state, c.i, c.j);
     else if (c.kind === 'wall') changed = placeWall(this.state, c.edge, c.type);
-    else if (c.kind === 'roof') changed = placeRoof(this.state, c.i, c.j, c.t, c.dir);
+    else if (c.kind === 'roof') changed = placeRoof(this.state, c.i, c.j, c.t, c.dir, c.rk);
+    else if (c.kind === 'fixture') changed = placeFixture(this.state, c.fixture);
     else if (c.kind === 'erase') changed = this.removeRef(c.target);
-    if (changed) this.refresh();
-    else this.undoStack.pop();
+    if (!changed) { this.undoStack.pop(); return; }
+    // structural check: anything that lost its support breaks off and falls
+    const dead = collapseUnsupported(this.state);
+    if (dead.length) this.ed3d.collapse(dead);
+    this.refresh();
   }
 
   removeRef(target) {
@@ -75,31 +99,21 @@ class App {
     if (target.kind === 'floor') return removeFloor(this.state, r.i, r.j);
     if (target.kind === 'wall') return removeWall(this.state, r);
     if (target.kind === 'roof') return removeRoof(this.state, r.i, r.j, r.t);
+    if (target.kind === 'fixture') return removeFixture(this.state, target.key);
     return false;
-  }
-
-  // RMB erase in the 3D view (raycast against placed pieces)
-  eraseAt(raycaster, group) {
-    const hits = raycaster.intersectObjects(group.children, true);
-    for (const h of hits) {
-      let o = h.object;
-      while (o && !o.userData?.kind) o = o.parent;
-      if (o && o.userData.kind !== 'gable') {
-        this.pushUndo();
-        if (this.removeRef(o.userData)) this.refresh();
-        else this.undoStack.pop();
-        return;
-      }
-    }
   }
 
   onHover(c) {
     const el = $('sel-info');
-    if (!c) { el.textContent = this.tool ? 'Hover a viewport to preview placement.' : 'Pick a piece from the palette, then hover a viewport.'; return; }
-    if (c.kind === 'floor') el.textContent = `Floor module at cell (${c.i}, ${c.j}) — ${c.ok ? 'valid: snaps to grid/neighbors' : 'invalid: must touch an existing floor'}`;
-    else if (c.kind === 'wall') el.textContent = `${c.type} wall on ${c.edge.o === 'H' ? 'east–west' : 'north–south'} edge (${c.edge.i}, ${c.edge.j}) — ${c.ok ? 'valid: snaps to floor edge' : 'invalid: needs a floor beside it'}`;
-    else if (c.kind === 'roof') el.textContent = `Roof panel at (${c.i}, ${c.j}), tier ${c.t}, sloping up ${DIR_NAMES[c.dir]} — ${c.ok ? 'valid: supported' : 'invalid: needs a wall below its low edge or an adjacent panel'}`;
-    else if (c.kind === 'erase') el.textContent = `Remove ${c.target.kind}`;
+    if (!c) {
+      el.textContent = this.tool ? 'Hover a viewport to preview placement.' : 'Pick a piece from the palette, then hover a viewport.';
+      return;
+    }
+    if (c.kind === 'floor') el.textContent = `Floor module at cell (${c.i}, ${c.j}) — ${c.ok ? 'valid: snaps to the grid beside existing floor' : 'invalid: must touch an existing floor'}`;
+    else if (c.kind === 'wall') el.textContent = `${WALL_PIECES[c.type].name} on ${c.edge.o === 'H' ? 'east–west' : 'north–south'} edge (${c.edge.i}, ${c.edge.j}) — ${c.ok ? 'valid: snaps to floor edge' : 'invalid: needs a floor beside it'}`;
+    else if (c.kind === 'roof') el.textContent = `${ROOF_KINDS[c.rk].name} at (${c.i}, ${c.j}), tier ${c.t}, sloping up ${DIR_NAMES[c.dir]} — ${c.ok ? 'valid: supported' : 'invalid: needs a wall below its low edge or an adjacent panel'}`;
+    else if (c.kind === 'fixture') el.textContent = `${FIXTURES[c.fixture.kind].name} — ${c.ok ? 'valid spot' : 'invalid: needs a ' + (FIXTURES[c.fixture.kind].host === 'wall' ? 'plain wall panel here' : FIXTURES[c.fixture.kind].host === 'roof' ? 'sloped roof panel here' : 'floor module here')}`;
+    else if (c.kind === 'erase') el.textContent = `Remove ${c.target.kind === 'fixture' ? FIXTURES[c.target.ref.kind].name : c.target.kind}`;
     $('status-pos').textContent = c.i !== undefined ? `cell ${c.i}, ${c.j}` : '';
   }
 
@@ -116,7 +130,7 @@ class App {
   refresh() {
     localStorage.setItem('shedforge', serialize(this.state));
     $('save-state').textContent = 'saved';
-    this.ed3d.rebuild(this.state);
+    this.ed3d.rebuild(this.state, this.stressView ? computeSupport(this.state) : null);
     this.ed2d.draw();
     this.updateStats();
   }
@@ -125,6 +139,7 @@ class App {
     return {
       taxRate: parseFloat($('opt-tax').value) || 0,
       wastePct: parseFloat($('opt-waste').value) || 0,
+      region: $('opt-region').value || 'irc',
     };
   }
 
@@ -132,10 +147,11 @@ class App {
     const r = buildReport(this.state, this.opts());
     const b = bounds(this.state);
     $('st-area').textContent = r.ok ? `${r.stats.area} ft²` : '—';
-    $('st-bbox').textContent = b ? `${b.w}′ × ${b.d}′` : '—';
+    $('st-bbox').textContent = b && r.ok ? `${b.w}′ × ${b.d}′ · ${r.stats.heightFt.toFixed(0)}′ peak` : '—';
     $('st-walls').textContent = r.ok ? r.stats.wallPanels : '—';
     $('st-roof').textContent = r.ok ? r.stats.roofPanels : '—';
     $('st-open').textContent = r.ok ? `${r.stats.doors} / ${r.stats.windows}` : '—';
+    $('st-sys').textContent = r.ok ? `${r.stats.elecDevices} dev / ${r.stats.plumbFixtures} fix` : '—';
     $('st-cost').textContent = r.ok ? money(r.cost.total) : '—';
     $('st-time').textContent = r.ok ? `≈ ${(r.minutes / 60).toFixed(1)} h` : '—';
     const wb = $('warn-box'), wl = $('warn-list');
@@ -156,6 +172,16 @@ class App {
     $('report-body').scrollTop = 0;
   }
 
+  buildRegionSelect() {
+    const sel = $('opt-region');
+    for (const [id, r] of Object.entries(REGIONS)) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = r.name;
+      sel.appendChild(o);
+    }
+  }
+
   // ---------- UI wiring ----------
   wireUI() {
     $('btn-new').addEventListener('click', () => {
@@ -174,22 +200,31 @@ class App {
     });
     document.querySelectorAll('.rtab').forEach(b =>
       b.addEventListener('click', () => this.showTab(b.dataset.tab)));
-    for (const id of ['opt-tax', 'opt-waste']) {
+    for (const id of ['opt-tax', 'opt-waste', 'opt-region']) {
       $(id).addEventListener('change', () => this.updateStats());
     }
+    $('opt-stress').addEventListener('change', e => {
+      this.stressView = e.target.checked;
+      this.refresh();
+    });
+    for (const [id, key] of [['layer-structure', 'structure'], ['layer-elec', 'elec'], ['layer-plumb', 'plumb']]) {
+      $(id).addEventListener('change', e => { this.layers2d[key] = e.target.checked; this.ed2d.draw(); });
+    }
     window.addEventListener('keydown', e => {
-      if (e.target.tagName === 'INPUT') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       if (e.key === 'Escape') {
         if (!$('report-overlay').hidden) { $('report-overlay').hidden = true; return; }
         this.setTool(null);
       }
-      if (e.key.toLowerCase() === 'r' && this.tool === 'roof') {
+      if (e.key.toLowerCase() === 'r' && this.tool && this.tool.startsWith('roof:')) {
         this.roofDir = (this.roofDir + 1) % 4;
-        this.setTool('roof');
+        this.setTool(this.tool);
       }
       if (e.key.toLowerCase() === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
-      const piece = PIECES.find(p => p.key === e.key);
-      if (piece) this.setTool(piece.id);
+      for (const grp of PALETTE) {
+        const piece = grp.items.find(p => p.key === e.key);
+        if (piece) this.setTool(piece.id);
+      }
     });
   }
 }

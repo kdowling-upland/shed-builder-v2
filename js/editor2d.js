@@ -1,29 +1,30 @@
-// editor2d.js — top-down plan view on a 2D canvas, fully interactive
-// (same placement tools as the 3D view, kept in sync).
-import {
-  CELL, DIRS, edgeForSide, edgeSegment, wallKey, roofKey, floorKey,
-  canPlaceFloor, canPlaceWall, bestRoofTier,
-} from './store.js';
+// editor2d.js — top-down plan view: structure, electrical and plumbing
+// layers with standard plan symbols. Fully interactive (same tools as 3D).
+import { CELL, DIRS, edgeSegment, wallKey } from './store.js';
+import { WALL_PIECES, FIXTURES } from './catalog.js';
+import { candidateAt, candidateSlot, eraseTargetAt } from './picker.js';
+import { electricalDesign, plumbingDesign, fixturePos } from './systems.js';
 
 export class Editor2D {
   constructor(canvas, app) {
     this.app = app;
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.scale = 16;                  // px per ft
-    this.origin = { x: 0, y: 0 };     // canvas px of world (0,0) — set on resize
+    this.scale = 16;
+    this.origin = { x: 0, y: 0 };
     this.hover = null;
-    this.mouse = null;
     this.panning = null;
+    this.painting = false;
+    this.erasing = false;
+    this.lastSlot = null;
     this.centered = false;
 
     canvas.addEventListener('pointermove', e => this.onMove(e));
-    canvas.addEventListener('pointerdown', e => {
-      if (e.button === 1) { this.panning = { x: e.clientX, y: e.clientY }; e.preventDefault(); }
+    canvas.addEventListener('pointerdown', e => this.onDown(e));
+    window.addEventListener('pointerup', () => {
+      this.panning = null; this.painting = this.erasing = false; this.lastSlot = null;
     });
-    window.addEventListener('pointerup', () => { this.panning = null; });
-    canvas.addEventListener('click', e => this.onClick(e, false));
-    canvas.addEventListener('contextmenu', e => { e.preventDefault(); this.onClick(e, true); });
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
       const k = e.deltaY < 0 ? 1.15 : 1 / 1.15;
@@ -59,52 +60,29 @@ export class Editor2D {
   px(x, z) { return [this.origin.x + x * this.scale, this.origin.y + z * this.scale]; }
 
   candidate(w) {
-    const { app } = this;
-    const state = app.state;
-    const i = Math.floor(w.x / CELL), j = Math.floor(w.z / CELL);
-    const tool = app.tool;
-    if (!tool) return null;
-    if (tool === 'floor') return { kind: 'floor', i, j, ok: canPlaceFloor(state, i, j) };
-    if (tool === 'wall' || tool === 'door' || tool === 'window') {
-      const lx = w.x - i * CELL, lz = w.z - j * CELL;
-      const sides = [
-        { d: lz, side: 0 }, { d: CELL - lx, side: 1 },
-        { d: CELL - lz, side: 2 }, { d: lx, side: 3 },
-      ].sort((a, b) => a.d - b.d);
-      const edge = edgeForSide(i, j, sides[0].side);
-      return { kind: 'wall', edge, type: tool === 'wall' ? 'solid' : tool, ok: canPlaceWall(state, edge) };
-    }
-    if (tool === 'roof') {
-      const t = bestRoofTier(state, i, j, app.roofDir);
-      return { kind: 'roof', i, j, t: Math.max(t, 0), dir: app.roofDir, ok: t >= 0 };
-    }
-    if (tool === 'erase') return this.eraseTarget(w, i, j);
-    return null;
+    return candidateAt(this.app.state, this.app.tool, w.x, w.z, this.app.roofDir);
   }
 
-  eraseTarget(w, i, j) {
-    const state = this.app.state;
-    // wall near an edge?
-    const lx = w.x - i * CELL, lz = w.z - j * CELL;
-    const sides = [
-      { d: lz, side: 0 }, { d: CELL - lx, side: 1 },
-      { d: CELL - lz, side: 2 }, { d: lx, side: 3 },
-    ].sort((a, b) => a.d - b.d);
-    if (sides[0].d < 0.8) {
-      const e = edgeForSide(i, j, sides[0].side);
-      if (state.walls[wallKey(e.o, e.i, e.j)]) {
-        return { kind: 'erase', target: { kind: 'wall', ref: state.walls[wallKey(e.o, e.i, e.j)] }, ok: true };
+  onDown(e) {
+    if (e.button === 1) { this.panning = { x: e.clientX, y: e.clientY }; e.preventDefault(); return; }
+    const w = this.toWorld(e);
+    if (e.button === 2) {
+      this.erasing = true;
+      const t = eraseTargetAt(this.app.state, w.x, w.z);
+      if (t) { this.app.applyCandidate(t); this.lastSlot = candidateSlot(t); }
+      return;
+    }
+    if (e.button === 0 && this.app.tool) {
+      if (this.app.tool === 'erase') {
+        this.erasing = true;
+        const t = eraseTargetAt(this.app.state, w.x, w.z);
+        if (t) { this.app.applyCandidate(t); this.lastSlot = candidateSlot(t); }
+        return;
       }
+      this.painting = true;
+      const c = this.candidate(w);
+      if (c) { this.app.applyCandidate(c); this.lastSlot = candidateSlot(c); }
     }
-    for (let t = 8; t >= 0; t--) {
-      if (state.roofs[roofKey(i, j, t)]) {
-        return { kind: 'erase', target: { kind: 'roof', ref: state.roofs[roofKey(i, j, t)] }, ok: true };
-      }
-    }
-    if (state.floors[floorKey(i, j)]) {
-      return { kind: 'erase', target: { kind: 'floor', ref: state.floors[floorKey(i, j)] }, ok: true };
-    }
-    return null;
   }
 
   onMove(e) {
@@ -115,23 +93,20 @@ export class Editor2D {
       this.draw();
       return;
     }
-    this.mouse = this.toWorld(e);
-    this.hover = this.app.tool ? this.candidate(this.mouse) : null;
-    this.app.onHover(this.hover);
-    this.draw();
-  }
-
-  onClick(e, rmb) {
     const w = this.toWorld(e);
-    if (rmb) {
-      const i = Math.floor(w.x / CELL), j = Math.floor(w.z / CELL);
-      const t = this.eraseTarget(w, i, j);
-      if (t) this.app.applyCandidate(t);
+    if (this.erasing) {
+      const t = eraseTargetAt(this.app.state, w.x, w.z);
+      const slot = candidateSlot(t);
+      if (t && slot !== this.lastSlot) { this.app.applyCandidate(t); this.lastSlot = slot; }
       return;
     }
-    if (!this.app.tool) return;
-    const c = this.candidate(w);
-    if (c) this.app.applyCandidate(c);
+    this.hover = this.app.tool ? this.candidate(w) : null;
+    this.app.onHover(this.hover);
+    if (this.painting && this.hover && this.hover.ok) {
+      const slot = candidateSlot(this.hover);
+      if (slot !== this.lastSlot) { this.app.applyCandidate(this.hover); this.lastSlot = slot; }
+    }
+    this.draw();
   }
 
   // ---------- drawing ----------
@@ -142,7 +117,6 @@ export class Editor2D {
     ctx.fillStyle = '#20242b';
     ctx.fillRect(0, 0, W, H);
 
-    // grid
     const s = this.scale * CELL;
     const x0 = ((this.origin.x % s) + s) % s, y0 = ((this.origin.y % s) + s) % s;
     ctx.strokeStyle = '#2e3540';
@@ -151,7 +125,6 @@ export class Editor2D {
     for (let x = x0; x < W; x += s) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
     for (let y = y0; y < H; y += s) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
     ctx.stroke();
-    // axes through world origin
     ctx.strokeStyle = '#3c4656';
     ctx.beginPath();
     ctx.moveTo(this.origin.x, 0); ctx.lineTo(this.origin.x, H);
@@ -159,26 +132,57 @@ export class Editor2D {
     ctx.stroke();
 
     const state = this.app.state;
-    // floors
-    for (const f of Object.values(state.floors)) {
-      const [px, py] = this.px(f.i * CELL, f.j * CELL);
-      ctx.fillStyle = '#6e5a3d';
-      ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
+    const layers = this.app.layers2d;
+
+    if (layers.structure) {
+      for (const f of Object.values(state.floors)) {
+        const [px, py] = this.px(f.i * CELL, f.j * CELL);
+        ctx.fillStyle = '#6e5a3d';
+        ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
+      }
+      for (const r of Object.values(state.roofs)) {
+        const [px, py] = this.px(r.i * CELL, r.j * CELL);
+        ctx.fillStyle = r.kind === 'flat' ? 'rgba(70,72,80,0.6)' : 'rgba(120,135,155,0.55)';
+        ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
+        if (r.kind !== 'flat') this.arrow(px + s / 2, py + s / 2, r.dir, s * 0.3);
+        ctx.fillStyle = '#dfe6ef';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(`t${r.t}${r.kind === 'r22' ? '·22°' : r.kind === 'flat' ? '·flat' : ''}`, px + 4, py + 12);
+      }
+      for (const w of Object.values(state.walls)) {
+        const cls = WALL_PIECES[w.type].cls;
+        const col = cls === 'door' ? '#c98a3d' : cls === 'window' ? '#79c4e0'
+          : cls === 'vent' ? '#9b86c9' : '#e8dcc0';
+        this.wallLine(w, col, 5);
+      }
     }
-    // roofs (over floors, translucent with slope arrow)
-    for (const r of Object.values(state.roofs)) {
-      const [px, py] = this.px(r.i * CELL, r.j * CELL);
-      ctx.fillStyle = 'rgba(120,135,155,0.55)';
-      ctx.fillRect(px + 1, py + 1, s - 2, s - 2);
-      this.arrow(px + s / 2, py + s / 2, r.dir, s * 0.3);
-      ctx.fillStyle = '#dfe6ef';
-      ctx.font = '10px sans-serif';
-      ctx.fillText(`t${r.t}`, px + 4, py + 12);
+
+    if (layers.elec) this.drawSystem(electricalDesign(state), '#ffd34d', '#ffb04d');
+    if (layers.plumb) this.drawSystem(plumbingDesign(state), '#5db4ff', '#6fe0c8');
+
+    // fixtures symbols
+    for (const f of Object.values(state.fixtures)) {
+      const spec = FIXTURES[f.kind];
+      if (spec.sys === 'elec' && !layers.elec) continue;
+      if (spec.sys === 'plumb' && !layers.plumb) continue;
+      if (spec.sys === 'roof' && !layers.structure) continue;
+      const pos = fixturePos(f);
+      const [px, py] = this.px(pos.x, pos.z);
+      const col = spec.sys === 'elec' ? '#ffd34d' : spec.sys === 'plumb' ? '#5db4ff' : '#dfe6ef';
+      ctx.strokeStyle = col;
+      ctx.fillStyle = col;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(px, py, 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.font = 'bold 8px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(spec.sym, px, py + 0.5);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
     }
-    // walls
-    for (const w of Object.values(state.walls)) {
-      this.wallLine(w, w.type === 'door' ? '#c98a3d' : w.type === 'window' ? '#79c4e0' : '#e8dcc0', 5);
-    }
+
     // hover ghost
     const h = this.hover;
     if (h && h.kind !== 'erase') {
@@ -193,11 +197,25 @@ export class Editor2D {
         if (h.kind === 'roof') this.arrow(px + s / 2, py + s / 2, h.dir, s * 0.3, col);
       } else if (h.kind === 'wall') {
         this.wallLine({ ...h.edge }, col, 6);
+      } else if (h.kind === 'fixture' && h.fixture) {
+        const pos = fixturePos(h.fixture);
+        const [px, py] = this.px(pos.x, pos.z);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(px, py, 9, 0, Math.PI * 2);
+        ctx.stroke();
       }
     } else if (h && h.kind === 'erase' && h.target.ref) {
       const ref = h.target.ref;
       if (h.target.kind === 'wall') this.wallLine(ref, 'rgba(224,85,85,0.9)', 7);
-      else {
+      else if (h.target.kind === 'fixture') {
+        const pos = fixturePos(ref);
+        const [px, py] = this.px(pos.x, pos.z);
+        ctx.strokeStyle = 'rgba(224,85,85,0.9)';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI * 2); ctx.stroke();
+      } else {
         const [px, py] = this.px(ref.i * CELL, ref.j * CELL);
         ctx.strokeStyle = 'rgba(224,85,85,0.9)';
         ctx.lineWidth = 3;
@@ -205,11 +223,35 @@ export class Editor2D {
       }
     }
 
-    // compass + scale
     ctx.fillStyle = '#9fb0c8';
     ctx.font = 'bold 12px sans-serif';
     ctx.fillText('N ↑', 12, H - 14);
     ctx.fillText(`${CELL}′ grid`, 48, H - 14);
+  }
+
+  drawSystem(design, colA, colB) {
+    const { ctx } = this;
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.5;
+    for (const r of design.routes) {
+      ctx.strokeStyle = r.kind === 'outlet' || r.kind === 'sink' ? colA : colB;
+      ctx.beginPath();
+      r.path.forEach(([x, z], i) => {
+        const [px, py] = this.px(x, z);
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      });
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (design.entry) {
+      const [px, py] = this.px(design.entry.x, design.entry.z);
+      ctx.fillStyle = colB;
+      ctx.beginPath();
+      ctx.moveTo(px, py - 7); ctx.lineTo(px + 6, py + 5); ctx.lineTo(px - 6, py + 5);
+      ctx.closePath(); ctx.fill();
+      ctx.font = '9px sans-serif';
+      ctx.fillText('supply in', px + 8, py + 4);
+    }
   }
 
   wallLine(w, color, width) {
@@ -232,7 +274,6 @@ export class Editor2D {
     ctx.moveTo(cx - d.dx * len, cy - d.dz * len);
     ctx.lineTo(cx + d.dx * len, cy + d.dz * len);
     ctx.stroke();
-    // arrowhead
     const hx = cx + d.dx * len, hy = cy + d.dz * len;
     ctx.beginPath();
     ctx.moveTo(hx, hy);

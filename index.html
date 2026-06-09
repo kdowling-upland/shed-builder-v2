@@ -17,7 +17,7 @@
 <body>
 <div id="app">
 
-  <!-- ===== Top toolbar (Unity-style) ===== -->
+  <!-- ===== Top toolbar ===== -->
   <header id="toolbar">
     <div class="tb-group brand">
       <span class="logo">⌂</span>
@@ -26,46 +26,50 @@
     </div>
     <div class="tb-group">
       <button id="btn-new" title="Clear the build area">New</button>
-      <button id="btn-demo" title="Load an 8×12 gable shed">Demo Shed</button>
+      <button id="btn-demo" title="Load an 8×12 example shed">Example Shed</button>
       <button id="btn-undo" title="Undo (Ctrl+Z)">↶ Undo</button>
     </div>
     <div class="tb-group grow"></div>
     <div class="tb-group">
       <span id="save-state" class="dim">saved</span>
-      <button id="btn-report" class="primary" title="Generate supply list, cost estimate and build guide">▶ Generate Build Report</button>
+      <button id="btn-report" class="primary" title="Generate supply list, cost estimate, code check and build guide">▶ Generate Build Report</button>
     </div>
   </header>
 
   <div id="workspace">
 
-    <!-- ===== Left: build palette (Valheim-style piece menu) ===== -->
+    <!-- ===== Left: build palette ===== -->
     <aside id="palette">
       <h2>Build Pieces</h2>
       <div id="palette-list"></div>
       <div class="palette-help">
         <h3>Controls</h3>
         <ul>
-          <li><b>LMB</b> place piece</li>
-          <li><b>RMB</b> remove piece</li>
+          <li><b>Click / drag</b> place pieces</li>
+          <li><b>Right-click / drag</b> remove</li>
           <li><b>R</b> rotate roof slope</li>
-          <li><b>LMB drag</b> orbit camera</li>
-          <li><b>MMB / wheel</b> pan / zoom</li>
-          <li><b>1–6</b> select piece &nbsp;<b>Esc</b> deselect</li>
+          <li><b>Middle-drag</b> orbit · <b>wheel</b> zoom</li>
+          <li><b>Esc</b> put the tool down to orbit freely</li>
         </ul>
-        <p class="dim">Pieces snap to a 4 ft grid like Valheim build
-        pieces. Walls snap to floor edges, roof panels snap on top of
-        walls and stack up the slope.</p>
+        <p class="dim">Pieces snap to a 4 ft framing grid. Walls snap to
+        floor edges, roof panels bear on walls and stack up the slope —
+        remove a support and whatever it carried comes down.</p>
       </div>
     </aside>
 
     <!-- ===== Center: viewports ===== -->
     <main id="viewports">
       <section class="viewport" id="vp3d-wrap">
-        <div class="vp-header"><span class="vp-dot"></span>Scene — 3D <span class="vp-hint" id="hint3d"></span></div>
+        <div class="vp-header"><span class="vp-dot"></span>3D view <span class="vp-hint" id="hint3d"></span></div>
         <canvas id="vp3d"></canvas>
       </section>
       <section class="viewport" id="vp2d-wrap">
-        <div class="vp-header"><span class="vp-dot dot2"></span>Plan — 2D top view <span class="vp-hint">click to build here too</span></div>
+        <div class="vp-header"><span class="vp-dot dot2"></span>Plan view
+          <label class="layer-toggle"><input type="checkbox" id="layer-structure" checked> structure</label>
+          <label class="layer-toggle"><input type="checkbox" id="layer-elec" checked> electrical</label>
+          <label class="layer-toggle"><input type="checkbox" id="layer-plumb" checked> plumbing</label>
+          <span class="vp-hint">click to build here too</span>
+        </div>
         <canvas id="vp2d"></canvas>
       </section>
     </main>
@@ -77,27 +81,38 @@
         <h3>Shed stats</h3>
         <table id="stats-table">
           <tr><td>Floor area</td><td id="st-area">—</td></tr>
-          <tr><td>Footprint</td><td id="st-bbox">—</td></tr>
+          <tr><td>Footprint / peak</td><td id="st-bbox">—</td></tr>
           <tr><td>Wall panels</td><td id="st-walls">—</td></tr>
           <tr><td>Roof panels</td><td id="st-roof">—</td></tr>
           <tr><td>Doors / windows</td><td id="st-open">—</td></tr>
+          <tr><td>Electrical / plumbing</td><td id="st-sys">—</td></tr>
           <tr class="hl"><td>Est. material cost</td><td id="st-cost">—</td></tr>
           <tr><td>Est. build time</td><td id="st-time">—</td></tr>
         </table>
+      </div>
+      <div class="insp-section">
+        <h3>View</h3>
+        <label class="field"><span>Structural stress colors</span>
+          <input type="checkbox" id="opt-stress">
+        </label>
+        <p class="dim">Green = solidly supported, red = about to fail. Pieces with no support collapse automatically.</p>
       </div>
       <div class="insp-section">
         <h3>Selected piece</h3>
         <div id="sel-info" class="dim">Pick a piece from the palette, then hover a viewport.</div>
       </div>
       <div class="insp-section">
-        <h3>Estimate settings</h3>
+        <h3>Estimate &amp; code settings</h3>
+        <label class="field">Region (code check)
+          <select id="opt-region"></select>
+        </label>
         <label class="field">Sales tax %
           <input type="number" id="opt-tax" value="0" min="0" max="20" step="0.1">
         </label>
         <label class="field">Waste factor %
           <input type="number" id="opt-waste" value="10" min="0" max="30" step="1">
         </label>
-        <p class="dim">Prices are typical big-box store estimates; adjust the tax for your region.</p>
+        <p class="dim">Prices are typical big-box store estimates. The code check is guidance, not a permit review.</p>
       </div>
       <div class="insp-section" id="warn-box" hidden>
         <h3>⚠ Warnings</h3>
@@ -123,6 +138,7 @@
           <button class="rtab" data-tab="cost">Cost Breakdown</button>
           <button class="rtab" data-tab="cuts">Cut List</button>
           <button class="rtab" data-tab="guide">Step-by-Step Guide</button>
+          <button class="rtab" data-tab="code">Code Check</button>
         </nav>
         <span class="grow"></span>
         <button id="btn-print">🖨 Print</button>

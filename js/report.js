@@ -13,7 +13,43 @@ export function renderReport(r, tab) {
     case 'cost': return cost(r);
     case 'cuts': return cuts(r);
     case 'guide': return guide(r);
+    case 'code': return codeCheck(r);
   }
+}
+
+function codeCheck(r) {
+  const { region, findings } = r.code;
+  const icon = { pass: '✔', warn: '⚠', fail: '✖', info: 'ℹ' };
+  const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
+  for (const f of findings) counts[f.level]++;
+  let html = `<h1>Building Code Check — ${esc(region.name)}</h1>
+  <p><span class="code-pass">${counts.pass} pass</span> ·
+     <span class="code-warn">${counts.warn} caution</span> ·
+     <span class="code-fail">${counts.fail} needs change</span> ·
+     <span class="code-info">${counts.info} info</span></p>
+  <div class="warnbox">This comparison uses IRC/NEC/IPC model-code rules with typical
+  regional amendments. It is planning guidance only — your city or county
+  (the AHJ) has the final say. Verify permit thresholds, setbacks and any
+  electrical/plumbing permits before building.</div>
+  <table>
+    <tr><th></th><th>Check</th><th>Code ref</th><th>Finding</th></tr>
+    ${findings.map(f => `<tr>
+      <td class="code-${f.level}">${icon[f.level]}</td>
+      <td><b>${esc(f.title)}</b></td>
+      <td>${esc(f.code)}</td>
+      <td>${esc(f.text)}</td></tr>`).join('')}
+  </table>
+  <h2>Region profile used</h2>
+  <table>
+    <tr><th>Parameter</th><th class="num">Value</th></tr>
+    <tr><td>Typical permit-exempt shed size</td><td class="num">${region.permitMaxSqft} sq ft</td></tr>
+    <tr><td>Typical accessory height limit</td><td class="num">${region.maxHeight}′</td></tr>
+    <tr><td>Ground snow load</td><td class="num">${region.snow} psf</td></tr>
+    <tr><td>Design wind speed</td><td class="num">${region.wind} mph</td></tr>
+    <tr><td>Frost depth</td><td class="num">${region.frost}″</td></tr>
+    <tr><td>Typical side/rear setback</td><td class="num">${region.setback}′</td></tr>
+  </table>`;
+  return html;
 }
 
 function warnings(r) {
@@ -42,6 +78,7 @@ function summary(r) {
     <li><b>Cost Breakdown</b> — itemized by build phase with subtotal, tax and total.</li>
     <li><b>Cut List</b> — every cut, optimized onto stock lengths (first-fit-decreasing) to minimize waste.</li>
     <li><b>Step-by-Step Guide</b> — ${r.phases.length} phases in the most efficient order, with every cut and every nail counted per step.</li>
+    <li><b>Code Check</b> — your design compared against ${esc(r.code.region.name)} building-code rules (${r.code.findings.length} checks).</li>
   </ul>
   <h2>Structure</h2>
   <table>
@@ -52,7 +89,12 @@ function summary(r) {
     <tr><td>Corners</td><td class="num">${s.corners}</td></tr>
     <tr><td>Doors</td><td class="num">${s.doors}</td></tr>
     <tr><td>Windows</td><td class="num">${s.windows}</td></tr>
-    <tr><td>Roof area</td><td class="num">${(s.roofSquares * 100).toFixed(0)} ft²</td></tr>
+    <tr><td>Vents / skylights</td><td class="num">${s.vents} / ${s.skylights}</td></tr>
+    <tr><td>Electrical devices</td><td class="num">${s.elecDevices}</td></tr>
+    <tr><td>Plumbing fixtures</td><td class="num">${s.plumbFixtures}</td></tr>
+    <tr><td>Peak height above grade</td><td class="num">${s.heightFt.toFixed(1)}′</td></tr>
+    <tr><td>Shingled roof area</td><td class="num">${(s.roofSquares * 100).toFixed(0)} ft²</td></tr>
+    ${s.epdmArea ? `<tr><td>EPDM flat-roof area</td><td class="num">${s.epdmArea} ft²</td></tr>` : ''}
   </table>`;
 }
 
