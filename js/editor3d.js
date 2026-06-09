@@ -5,10 +5,12 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import {
   CELL, WALL_H, FLOOR_TOP, DIRS, riseOf,
   cellsOfEdge, floorKey, roofHeights, gableTriangles, roofKey,
+  diagKey, diagSegment, cellCorner,
 } from './store.js';
 import { WALL_PIECES, FIXTURES } from './catalog.js';
 import { makeTextures } from './textures.js';
 import { candidateAt, candidateSlot, eraseTargetAt } from './picker.js';
+import { electricalDesign, plumbingDesign, fixturePos } from './systems.js';
 
 const Y0 = FLOOR_TOP;
 
@@ -61,6 +63,9 @@ export class Editor3D {
       dark: lam({ color: 0x4c4c46 }),
       red: lam({ color: 0xb33a2e }),
       glow: new THREE.MeshBasicMaterial({ color: 0xffe9b0 }),
+      wire: lam({ color: 0xe8c34d }),
+      pex: lam({ color: 0x4d9fe8 }),
+      pvc: lam({ color: 0xe8e6e0 }),
     };
 
     const ground = new THREE.Mesh(
@@ -79,6 +84,8 @@ export class Editor3D {
     this.raycaster = new THREE.Raycaster();
     this.pieceGroup = new THREE.Group();
     this.scene.add(this.pieceGroup);
+    this.sysGroup = new THREE.Group();
+    this.scene.add(this.sysGroup);
     this.fallGroup = new THREE.Group();
     this.scene.add(this.fallGroup);
 
@@ -137,18 +144,22 @@ export class Editor3D {
 
     for (const f of Object.values(state.floors)) {
       const g = stress ? this.boxPiece(f.i * CELL + 2, Y0 / 2, f.j * CELL + 2, CELL, Y0, CELL, tint(1))
-        : this.floorMesh(f);
+        : this.floorMesh(f, state);
       g.userData = { kind: 'floor', ref: f };
       this.pieceGroup.add(g);
     }
     for (const [k, w] of Object.entries(state.walls)) {
-      const g = stress
-        ? this.simpleWall(w, tint(support.walls[k] ?? 0))
-        : this.wallMesh(w, state);
+      let g;
+      if (w.o === 'D') {
+        g = stress ? this.diagSimple(w, tint(support.walls[k] ?? 0)) : this.diagWallMesh(w);
+      } else {
+        g = stress ? this.simpleWall(w, tint(support.walls[k] ?? 0)) : this.wallMesh(w, state);
+      }
       g.userData = { kind: 'wall', ref: w };
       this.pieceGroup.add(g);
     }
-    if (!stress) this.addCornerBoards(state);
+    if (!stress) { this.addCornerBoards(state); this.addPorchPosts(state); }
+    this.buildSystems3D(state);
     for (const [k, r] of Object.entries(state.roofs)) {
       const g = stress
         ? this.roofSlab(r, tint(support.roofs[k] ?? 0))
@@ -180,18 +191,135 @@ export class Editor3D {
     return m;
   }
 
-  // floor module: treated skids + framed band with deck top
-  floorMesh(f) {
+  // floor module: treated skids + framed band with deck top. Cells with a
+  // diagonal wall render as a half-cell triangle (chamfered corner).
+  floorMesh(f, state) {
     const g = new THREE.Group();
     const x = f.i * CELL, z = f.j * CELL;
+    const dw = state && state.walls[diagKey(f.i, f.j)];
     for (const lz of [0.7, 3.3]) {
-      g.add(this.boxPiece(x + 2, 0.23, z + lz, CELL, 0.46, 0.45, this.M.treated));
+      g.add(this.boxPiece(x + 2, 0.23, z + lz, CELL, 0.46, dw ? 0.3 : 0.45, this.M.treated));
     }
-    const band = this.box(CELL, Y0 - 0.46, CELL,
-      [this.M.lumber, this.M.lumber, this.M.deck, this.M.lumber, this.M.lumber, this.M.lumber]);
-    band.position.set(x + 2, 0.46 + (Y0 - 0.46) / 2, z + 2);
-    g.add(band);
+    if (!dw) {
+      const band = this.box(CELL, Y0 - 0.46, CELL,
+        [this.M.lumber, this.M.lumber, this.M.deck, this.M.lumber, this.M.lumber, this.M.lumber]);
+      band.position.set(x + 2, 0.46 + (Y0 - 0.46) / 2, z + 2);
+      g.add(band);
+      return g;
+    }
+    // kept half = the three corners that are NOT the cut corner
+    const shape = new THREE.Shape();
+    const pts = [1, 2, 3].map(o => cellCorner(f.i, f.j, (dw.k + o) % 4));
+    shape.moveTo(pts[0][0], -pts[0][1]);
+    shape.lineTo(pts[1][0], -pts[1][1]);
+    shape.lineTo(pts[2][0], -pts[2][1]);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: Y0 - 0.46, bevelEnabled: false });
+    const m = new THREE.Mesh(geo, [this.M.deck, this.M.lumber]);
+    m.rotation.x = -Math.PI / 2;
+    m.position.y = Y0;
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
     return g;
+  }
+
+  diagSimple(w, mat) {
+    const [ax, az, bx, bz] = diagSegment(w);
+    const m = this.box(Math.hypot(bx - ax, bz - az), WALL_H, 0.4, mat);
+    m.position.set((ax + bx) / 2, Y0 + WALL_H / 2, (az + bz) / 2);
+    m.rotation.y = -Math.atan2(bz - az, bx - ax);
+    return m;
+  }
+
+  // framed 45° chamfer wall: beveled plates, 5 studs, siding outside
+  diagWallMesh(w) {
+    const g = new THREE.Group();
+    const SD = 0.3, ST = 0.125;
+    const [ax, az, bx, bz] = diagSegment(w);
+    const L = Math.hypot(bx - ax, bz - az);
+    const top = Y0 + WALL_H;
+    g.add(this.boxPiece(0, Y0 + ST / 2, 0, L, ST, SD, this.M.lumber));
+    g.add(this.boxPiece(0, top - ST * 1.5, 0, L, ST, SD, this.M.lumber));
+    g.add(this.boxPiece(0, top - ST / 2, 0, L, ST, SD, this.M.lumber));
+    const studH = WALL_H - 3 * ST;
+    for (let k = 0; k < 5; k++) {
+      const sx = -L / 2 + ST / 2 + k * ((L - ST) / 4);
+      g.add(this.boxPiece(sx, Y0 + ST + studH / 2, 0, ST, studH, SD, this.M.lumber));
+    }
+    // exterior = the side the cut corner is on
+    const mid = { x: (ax + bx) / 2, z: (az + bz) / 2 };
+    const corner = cellCorner(w.i, w.j, w.k);
+    const dx = bx - ax, dz = bz - az;
+    const extS = Math.sign(dx * (corner[1] - mid.z) - dz * (corner[0] - mid.x)) || 1;
+    const skin = this.box(L, WALL_H, 0.09, this.M.siding);
+    skin.position.set(0, Y0 + WALL_H / 2, extS * (SD / 2 + 0.05));
+    g.add(skin);
+    if (w.drywall) {
+      const dwm = this.box(L, WALL_H, 0.06, this.M.drywall);
+      dwm.position.set(0, Y0 + WALL_H / 2, -extS * (SD / 2 + 0.04));
+      g.add(dwm);
+    }
+    g.position.set(mid.x, 0, mid.z);
+    g.rotation.y = -Math.atan2(dz, dx);
+    return g;
+  }
+
+  // porch posts at the endpoints of post/railing bays (deduped)
+  addPorchPosts(state) {
+    const ends = new Set();
+    for (const w of Object.values(state.walls)) {
+      if ((WALL_PIECES[w.type] || {}).cls !== 'porch') continue;
+      if (w.o === 'H') { ends.add(`${w.i},${w.j}`); ends.add(`${w.i + 1},${w.j}`); }
+      else { ends.add(`${w.i},${w.j}`); ends.add(`${w.i},${w.j + 1}`); }
+    }
+    for (const p of ends) {
+      const [i, j] = p.split(',').map(Number);
+      const post = this.box(0.32, WALL_H, 0.32, this.M.treated);
+      post.position.set(i * CELL, Y0 + WALL_H / 2, j * CELL);
+      post.userData = { kind: 'gable' };
+      this.pieceGroup.add(post);
+    }
+  }
+
+  // 3D wiring & plumbing runs (axis-aligned tubes), gated by the layer toggles
+  buildSystems3D(state) {
+    this.sysGroup.clear();
+    const seg = (x1, y1, z1, x2, y2, z2, r, mat) => {
+      const m = this.box(Math.abs(x2 - x1) + r, Math.abs(y2 - y1) + r, Math.abs(z2 - z1) + r, mat);
+      m.position.set((x1 + x2) / 2, (y1 + y2) / 2, (z1 + z2) / 2);
+      m.castShadow = false;
+      this.sysGroup.add(m);
+    };
+    const devY = { outlet: 1.33, switch: 4, extLight: 6.9, light: 7.3, panel: 4.6, sink: 2.3, hosebib: 1.5 };
+    const layers = this.app.layers2d;
+    if (layers.elec) {
+      const e = electricalDesign(state);
+      const hY = Y0 + 7.45;
+      for (const r of e.routes) {
+        const [a, m, b] = r.path;
+        seg(a[0], Y0 + devY.panel, a[1], a[0], hY, a[1], 0.07, this.M.wire);
+        seg(a[0], hY, a[1], m[0], hY, m[1], 0.07, this.M.wire);
+        seg(m[0], hY, m[1], b[0], hY, b[1], 0.07, this.M.wire);
+        seg(b[0], hY, b[1], b[0], Y0 + (devY[r.kind] ?? 4), b[1], 0.07, this.M.wire);
+      }
+    }
+    if (layers.plumb) {
+      const p = plumbingDesign(state);
+      const hY = Y0 + 0.24;
+      for (const r of p.routes) {
+        const [a, m, b] = r.path;
+        if (r.kind === 'drain') {
+          const dY = Y0 + 0.14;
+          seg(a[0], Y0 + 1.6, a[1], a[0], dY, a[1], 0.12, this.M.pvc);
+          seg(a[0], dY, a[1], m[0], dY, m[1], 0.12, this.M.pvc);
+          seg(m[0], dY, m[1], b[0], dY, b[1], 0.12, this.M.pvc);
+        } else {
+          seg(a[0], hY, a[1], m[0], hY, m[1], 0.08, this.M.pex);
+          seg(m[0], hY, m[1], b[0], hY, b[1], 0.08, this.M.pex);
+          seg(b[0], hY, b[1], b[0], Y0 + (devY[r.kind] ?? 1.5), b[1], 0.08, this.M.pex);
+        }
+      }
+      if (p.entry) seg(p.entry.x, 0, p.entry.z, p.entry.x, hY, p.entry.z, 0.1, this.M.pex);
+    }
   }
 
   simpleWall(w, mat) {
@@ -226,6 +354,21 @@ export class Editor3D {
     const g = new THREE.Group();
     const SD = 0.3, ST = 0.125;        // stud depth 3.5″, lumber 1.5″
     const top = Y0 + WALL_H;
+
+    if (spec.cls === 'porch') {
+      // posts render globally (shared corners); railing bays add rails+balusters
+      if (w.type === 'railing') {
+        for (const ry of [Y0 + 2.9, Y0 + 0.4]) {
+          g.add(this.boxPiece(0, ry, 0, CELL - 0.35, 0.22, 0.22, this.M.treated));
+        }
+        for (let k = 0; k < 9; k++) {
+          const bx = -1.6 + k * 0.4;
+          g.add(this.boxPiece(bx, Y0 + 1.65, 0, 0.12, 2.3, 0.12, this.M.trim));
+        }
+      }
+      this.placeOnEdge(g, w);
+      return g;
+    }
 
     const cells = cellsOfEdge(w);
     const f1 = !!state.floors[floorKey(cells[1].i, cells[1].j)];
@@ -611,6 +754,8 @@ export class Editor3D {
     } else if (h.kind === 'drywall') {
       this.ghost = this.simpleWall({ ...h.edge }, this.ghostMat);
       this.ghost.scale.set(1, 0.98, 0.6);
+    } else if (h.kind === 'diag') {
+      this.ghost = this.diagSimple({ i: h.i, j: h.j, k: h.k }, this.ghostMat);
     } else if (h.kind === 'wall') {
       this.ghost = this.simpleWall({ ...h.edge }, this.ghostMat);
     } else if (h.kind === 'roof') {

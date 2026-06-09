@@ -78,6 +78,41 @@ export function canPlaceWall(state, e) {
   return cellsOfEdge(e).some(c => state.floors[floorKey(c.i, c.j)]);
 }
 
+// Diagonal walls chamfer a floor cell at 45°. Stored in state.walls with
+// o:'D', key `D,i,j`; `k` is the corner being cut (0=NW 1=NE 2=SE 3=SW).
+export const diagKey = (i, j) => `D,${i},${j}`;
+
+export function canPlaceDiag(state, i, j) {
+  return !!state.floors[floorKey(i, j)] && !state.walls[diagKey(i, j)];
+}
+export function placeDiag(state, i, j, k) {
+  if (!canPlaceDiag(state, i, j)) return false;
+  state.walls[diagKey(i, j)] = { o: 'D', i, j, k, type: 'solid' };
+  return true;
+}
+
+// segment endpoints of a diagonal wall in plan feet [x0,z0,x1,z1]
+export function diagSegment(w) {
+  const x0 = w.i * CELL, z0 = w.j * CELL, x1 = x0 + CELL, z1 = z0 + CELL;
+  return (w.k === 0 || w.k === 2)
+    ? [x1, z0, x0, z1]   // anti-diagonal (cuts NW or SE)
+    : [x0, z0, x1, z1];  // main diagonal (cuts NE or SW)
+}
+
+// cell corner coordinates: 0=NW 1=NE 2=SE 3=SW
+export function cellCorner(i, j, k) {
+  const x0 = i * CELL, z0 = j * CELL;
+  return [
+    [x0, z0], [x0 + CELL, z0], [x0 + CELL, z0 + CELL], [x0, z0 + CELL],
+  ][k];
+}
+
+// edges of a cell that a diagonal wall replaces (the two beside the cut corner)
+export function diagCoveredEdges(w) {
+  const sides = { 0: [0, 3], 1: [0, 1], 2: [2, 1], 3: [2, 3] }[w.k];
+  return sides.map(s => edgeForSide(w.i, w.j, s));
+}
+
 export function canPlaceRoof(state, i, j, t, dir, kind = 'r45') {
   if (state.roofs[roofKey(i, j, t)]) return false;
   if (kind === 'flat' && t > 0) return false;
@@ -184,7 +219,11 @@ export function computeSupport(state) {
   const sup = { floors: {}, walls: {}, roofs: {} };
   for (const k of Object.keys(state.floors)) sup.floors[k] = 1;
   for (const [k, w] of Object.entries(state.walls)) {
-    sup.walls[k] = cellsOfEdge(w).some(c => state.floors[floorKey(c.i, c.j)]) ? 0.95 : 0;
+    if (w.o === 'D') {
+      sup.walls[k] = state.floors[floorKey(w.i, w.j)] ? 0.95 : 0;
+    } else {
+      sup.walls[k] = cellsOfEdge(w).some(c => state.floors[floorKey(c.i, c.j)]) ? 0.95 : 0;
+    }
   }
   // seed roofs from supporting walls, then relax until stable
   for (const k of Object.keys(state.roofs)) sup.roofs[k] = 0;
@@ -343,5 +382,11 @@ export function demoShed() {
   placeFixture(s, { kind: 'hosebib', o: 'H', i: 0, j: 2 });
   placeFixture(s, { kind: 'skylight', i: 2, j: 1, t: 0 });
   toggleDrywall(s, { o: 'V', i: 0, j: 0 }); // show one finished interior wall
+  // porch across the front (south): deck + posts + railing + low flat roof
+  for (let i = 0; i < 3; i++) placeFloor(s, i, 2);
+  for (let i = 0; i < 3; i++) placeWall(s, { o: 'H', i, j: 3 }, i === 1 ? 'post' : 'railing');
+  placeWall(s, { o: 'V', i: 0, j: 2 }, 'railing');
+  placeWall(s, { o: 'V', i: 3, j: 2 }, 'railing');
+  for (let i = 0; i < 3; i++) placeRoof(s, i, 2, 0, 0, 'flat');
   return s;
 }

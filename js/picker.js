@@ -3,8 +3,8 @@
 // Tool ids: 'floor' | 'wall' | 'wt:<wallType>' | 'roof:<kind>' | 'fx:<kind>' | 'erase'
 
 import {
-  CELL, edgeForSide, wallKey, roofKey, floorKey, fixtureKey,
-  canPlaceFloor, canPlaceWall, bestRoofTier, canPlaceFixture,
+  CELL, edgeForSide, wallKey, roofKey, floorKey, fixtureKey, diagKey,
+  canPlaceFloor, canPlaceWall, bestRoofTier, canPlaceFixture, canPlaceDiag,
 } from './store.js';
 import { FIXTURES } from './catalog.js';
 
@@ -24,6 +24,7 @@ export function candidateSlot(c) {
     case 'floor': return `f:${c.i},${c.j}`;
     case 'wall': return `w:${c.edge.o},${c.edge.i},${c.edge.j}`;
     case 'roof': return `r:${c.i},${c.j},${c.t}`;
+    case 'diag': return `dg:${c.i},${c.j}`;
     case 'drywall': return `d:${c.edge.o},${c.edge.i},${c.edge.j}`;
     case 'fixture': return `x:${fixtureKey(c.fixture)}`;
     case 'erase': return `e:${c.target.kind}:${JSON.stringify(c.target.ref)}`;
@@ -64,6 +65,9 @@ export function candidateAt(state, tool, x, z, roofDir) {
     }
     return { kind: 'fixture', fixture, ok: canPlaceFixture(state, fixture) };
   }
+  if (tool === 'wallDiag') {
+    return { kind: 'diag', i, j, k: roofDir, ok: canPlaceDiag(state, i, j) };
+  }
   if (tool === 'drywall') {
     const { edge } = nearestEdge(x, z, i, j);
     const w = state.walls[wallKey(edge.o, edge.i, edge.j)];
@@ -94,6 +98,9 @@ export function eraseTargetAt(state, x, z) {
     if ((f.host === 'cell' || f.host === 'roof') && f.i === i && f.j === j) {
       return { kind: 'erase', target: { kind: 'fixture', ref: f, key: fk }, ok: true };
     }
+  }
+  if (state.walls[diagKey(i, j)]) {
+    return { kind: 'erase', target: { kind: 'wall', ref: state.walls[diagKey(i, j)] }, ok: true };
   }
   for (let t = 8; t >= 0; t--) {
     if (state.roofs[roofKey(i, j, t)]) {

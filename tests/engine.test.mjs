@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   emptyState, demoShed, placeFloor, placeWall, placeRoof, placeFixture,
   canPlaceFloor, canPlaceWall, canPlaceRoof, canPlaceFixture,
-  edgeForSide, bestRoofTier, removeWall, toggleDrywall, deserialize,
+  edgeForSide, bestRoofTier, removeWall, toggleDrywall, deserialize, placeDiag,
   perimeterEdges, gableTriangles, bounds,
   computeSupport, collapseUnsupported,
 } from '../js/store.js';
@@ -109,6 +109,54 @@ test('drywall toggles per wall and reaches the report', () => {
   assert.ok(!s.walls['H,0,0'].drywall, 'second click removes it');
 });
 
+test('diagonal walls chamfer a cell and cover its corner edges', () => {
+  const s = emptyState();
+  placeFloor(s, 0, 0);
+  assert.ok(placeDiag(s, 0, 0, 1), 'cut the NE corner');
+  assert.ok(!placeDiag(s, 0, 0, 2), 'one diagonal per cell');
+  placeWall(s, edgeForSide(0, 0, 2), 'solid');
+  placeWall(s, edgeForSide(0, 0, 3), 'solid');
+  const r = buildReport(s, {});
+  assert.equal(r.stats.area, 8, 'half the cell is cut away');
+  assert.equal(r.stats.diagWalls, 1);
+  assert.ok(!r.warnings.some(w => w.includes('no wall')),
+    'diagonal covers the two cut-corner edges');
+});
+
+test('porch: posts carry a roof, railing is costed', () => {
+  const s = emptyState();
+  placeFloor(s, 0, 0);
+  assert.ok(placeWall(s, edgeForSide(0, 0, 2), 'post'));
+  assert.ok(canPlaceRoof(s, 0, 0, 0, 0, 'flat'), 'roof bears on the post bay');
+  placeRoof(s, 0, 0, 0, 0, 'flat');
+  placeWall(s, edgeForSide(0, 0, 1), 'railing');
+  assert.equal(collapseUnsupported(s).length, 0, 'porch roof is supported');
+  const r = buildReport(s, {});
+  assert.ok(r.categories.some(c => c.name === 'Porch'));
+  assert.ok(r.supply.some(x => x.sku === 'post4x4'));
+  assert.ok(r.supply.some(x => x.sku === 'baluster'));
+  assert.ok(r.phases.some(p => p.name === 'Porch posts & railing'));
+  assert.ok(r.code.findings.some(f => /Porch guards/.test(f.title)));
+});
+
+test('porch roof collapses when its post bay is removed', () => {
+  const s = emptyState();
+  placeFloor(s, 0, 0);
+  placeWall(s, edgeForSide(0, 0, 2), 'post');
+  placeRoof(s, 0, 0, 0, 0, 'flat');
+  removeWall(s, edgeForSide(0, 0, 2));
+  assert.equal(collapseUnsupported(s).length, 1);
+});
+
+test('systems designs include 3D-renderable routes', () => {
+  const e = electricalDesign(demoShed());
+  const p = plumbingDesign(demoShed());
+  for (const r of [...e.routes, ...p.routes]) {
+    assert.equal(r.path.length, 3, 'L-shaped manhattan path');
+  }
+  assert.ok(p.routes.some(r => r.kind === 'drain'), 'sink drain route present');
+});
+
 console.log('store.js — structural support physics');
 test('roof collapses when its supporting wall is removed', () => {
   const s = emptyState();
@@ -136,14 +184,13 @@ test('collapse cascades up a stacked slope', () => {
   assert.equal(dead.filter(d => d.kind === 'roof').length, 3, 'whole chain falls');
 });
 
-test('demo shed is fully supported', () => {
+test('demo shed (with porch) is fully supported', () => {
   const s = demoShed();
   assert.equal(collapseUnsupported(s).length, 0);
   const b = bounds(s);
-  assert.equal(b.w, 12); assert.equal(b.d, 8);
-  assert.equal(perimeterEdges(s).length, 10);
-  assert.equal(Object.keys(s.walls).length, 10);
-  assert.equal(Object.keys(s.roofs).length, 6);
+  assert.equal(b.w, 12); assert.equal(b.d, 12, 'shed + porch footprint');
+  assert.equal(Object.keys(s.walls).length, 15, '10 shed walls + 5 porch bays');
+  assert.equal(Object.keys(s.roofs).length, 9, '6 gable + 3 porch panels');
   assert.equal(gableTriangles(s).length, 4, 'two triangles per gable end');
 });
 
@@ -233,11 +280,12 @@ test('demo shed report is consistent', () => {
   const r = buildReport(demoShed(), { taxRate: 8, wastePct: 10, region: 'midwest' });
   assert.ok(r.ok);
   assert.equal(r.warnings.length, 0, `expected no warnings, got: ${r.warnings}`);
-  assert.equal(r.stats.area, 96);
+  assert.equal(r.stats.area, 144, 'shed 96 + porch deck 48');
   assert.equal(r.stats.doors, 1);
   assert.equal(r.stats.windows, 2);
   assert.equal(r.stats.vents, 1);
   assert.equal(r.stats.skylights, 1);
+  assert.equal(r.stats.porchBays, 5);
   assert.equal(r.stats.corners, 4);
   assert.ok(r.cost.subtotal > 2000 && r.cost.subtotal < 6000, `plausible cost, got ${r.cost.subtotal}`);
   assert.ok(Math.abs(r.cost.total - r.cost.subtotal * 1.08) < 0.01, 'tax applied');

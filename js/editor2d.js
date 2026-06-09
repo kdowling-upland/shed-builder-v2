@@ -1,6 +1,6 @@
 // editor2d.js — top-down plan view: structure, electrical and plumbing
 // layers with standard plan symbols. Fully interactive (same tools as 3D).
-import { CELL, DIRS, edgeSegment, wallKey, bounds } from './store.js';
+import { CELL, DIRS, edgeSegment, wallKey, bounds, diagSegment } from './store.js';
 import { WALL_PIECES, FIXTURES } from './catalog.js';
 import { candidateAt, candidateSlot, eraseTargetAt } from './picker.js';
 import { electricalDesign, plumbingDesign, fixturePos } from './systems.js';
@@ -167,7 +167,26 @@ export class Editor2D {
         ctx.fillText(`t${r.t}${r.kind === 'r22' ? '·22°' : r.kind === 'flat' ? '·flat' : ''}`, px + 4, py + 12);
       }
       for (const w of Object.values(state.walls)) {
+        if (w.o === 'D') {
+          this.lineSeg(diagSegment(w), '#e8dcc0', 5);
+          if (w.drywall) this.lineSeg(diagSegment(w), '#fdfaf2', 1.5);
+          continue;
+        }
         const cls = (WALL_PIECES[w.type] || WALL_PIECES.solid).cls;
+        if (cls === 'porch') {
+          const ctx2 = this.ctx;
+          ctx2.setLineDash([5, 4]);
+          this.wallLine(w, '#caa86f', w.type === 'railing' ? 4 : 2.5);
+          ctx2.setLineDash([]);
+          // post squares at the bay ends
+          const [ax, az, bx, bz] = edgeSegment(w);
+          for (const [px2, pz2] of [[ax, az], [bx, bz]]) {
+            const [cx2, cy2] = this.px(px2, pz2);
+            ctx2.fillStyle = '#caa86f';
+            ctx2.fillRect(cx2 - 3, cy2 - 3, 6, 6);
+          }
+          continue;
+        }
         const col = cls === 'door' ? '#c98a3d' : cls === 'window' ? '#79c4e0'
           : cls === 'vent' ? '#9b86c9' : '#e8dcc0';
         this.wallLine(w, col, 5);
@@ -215,6 +234,8 @@ export class Editor2D {
         if (h.kind === 'roof') this.arrow(px + s / 2, py + s / 2, h.dir, s * 0.3, col);
       } else if (h.kind === 'wall' || h.kind === 'drywall') {
         this.wallLine({ ...h.edge }, col, 6);
+      } else if (h.kind === 'diag') {
+        this.lineSeg(diagSegment({ i: h.i, j: h.j, k: h.k }), col, 6);
       } else if (h.kind === 'fixture' && h.fixture) {
         const pos = fixturePos(h.fixture);
         const [px, py] = this.px(pos.x, pos.z);
@@ -226,7 +247,8 @@ export class Editor2D {
       }
     } else if (h && h.kind === 'erase' && h.target.ref) {
       const ref = h.target.ref;
-      if (h.target.kind === 'wall') this.wallLine(ref, 'rgba(224,85,85,0.9)', 7);
+      if (h.target.kind === 'wall' && ref.o === 'D') this.lineSeg(diagSegment(ref), 'rgba(224,85,85,0.9)', 7);
+      else if (h.target.kind === 'wall') this.wallLine(ref, 'rgba(224,85,85,0.9)', 7);
       else if (h.target.kind === 'fixture') {
         const pos = fixturePos(ref);
         const [px, py] = this.px(pos.x, pos.z);
@@ -273,7 +295,10 @@ export class Editor2D {
   }
 
   wallLine(w, color, width) {
-    const [ax, az, bx, bz] = edgeSegment(w);
+    this.lineSeg(edgeSegment(w), color, width);
+  }
+
+  lineSeg([ax, az, bx, bz], color, width) {
     const [x1, y1] = this.px(ax, az), [x2, y2] = this.px(bx, bz);
     const { ctx } = this;
     ctx.strokeStyle = color;

@@ -1,7 +1,7 @@
 // main.js — application shell: tool state, undo, persistence, UI wiring.
 import {
   emptyState, demoShed, serialize, deserialize, DIR_NAMES, bounds,
-  placeFloor, placeWall, placeRoof, placeFixture, toggleDrywall,
+  placeFloor, placeWall, placeRoof, placeFixture, toggleDrywall, placeDiag,
   removeFloor, removeWall, removeRoof, removeFixture,
   collapseUnsupported, computeSupport,
 } from './store.js';
@@ -38,43 +38,91 @@ class App {
   }
 
   // ---------- palette & tools ----------
+  // One button per piece; pieces with variants get a ▾ flyout to swap the
+  // active type (e.g. Window ▾ → single-hung / slider / transom).
   buildPalette() {
     const list = $('palette-list');
-    for (const grp of PALETTE) {
-      const det = document.createElement('details');
-      det.className = 'palette-details';
-      det.open = ['Structure', 'Openings'].includes(grp.group);
-      const sum = document.createElement('summary');
-      sum.className = 'palette-group';
-      sum.textContent = grp.group;
-      det.appendChild(sum);
-      for (const p of grp.items) {
-        const b = document.createElement('button');
-        b.className = 'piece-btn';
-        b.dataset.tool = p.id;
-        b.innerHTML = `<span class="pi">${p.icon}</span><span><span class="pn">${p.name}</span><span class="pd">${p.desc}</span></span>${p.key ? `<span class="pk">${p.key}</span>` : ''}`;
-        b.addEventListener('click', () => this.setTool(this.tool === p.id ? null : p.id));
-        det.appendChild(b);
+    this.current = {};                       // item.id (base) → active variant tool id
+    for (const p of PALETTE) {
+      this.current[p.id] = p.id;
+      const row = document.createElement('div');
+      row.className = 'piece-row';
+      const b = document.createElement('button');
+      b.className = 'piece-btn';
+      b.dataset.item = p.id;
+      const variantName = () => {
+        const v = p.variants?.find(v => v.id === this.current[p.id]);
+        return v ? v.name : null;
+      };
+      const render = () => {
+        b.innerHTML = `<span class="pi">${p.icon}</span><span><span class="pn">${p.name}</span><span class="pd">${variantName() || p.desc}</span></span>${p.key ? `<span class="pk">${p.key}</span>` : ''}`;
+      };
+      render();
+      b.addEventListener('click', () => {
+        const t = this.current[p.id];
+        this.setTool(this.tool === t ? null : t);
+      });
+      row.appendChild(b);
+      if (p.variants) {
+        const arrow = document.createElement('button');
+        arrow.className = 'variant-arrow';
+        arrow.textContent = '▾';
+        arrow.title = `Choose a ${p.name.toLowerCase()} type`;
+        arrow.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.closeVariantMenu();
+          const menu = document.createElement('div');
+          menu.className = 'variant-menu';
+          for (const v of p.variants) {
+            const vb = document.createElement('button');
+            vb.className = 'variant-opt' + (this.current[p.id] === v.id ? ' active' : '');
+            vb.innerHTML = `<b>${v.name}</b><span>${v.desc}</span>`;
+            vb.addEventListener('click', () => {
+              this.current[p.id] = v.id;
+              render();
+              this.closeVariantMenu();
+              this.setTool(v.id);
+            });
+            menu.appendChild(vb);
+          }
+          row.appendChild(menu);
+          this.variantMenu = menu;
+        });
+        row.appendChild(arrow);
       }
-      list.appendChild(det);
+      list.appendChild(row);
     }
+    document.addEventListener('pointerdown', (e) => {
+      if (this.variantMenu && !e.target.closest('.variant-menu') && !e.target.closest('.variant-arrow')) {
+        this.closeVariantMenu();
+      }
+    });
+  }
+
+  closeVariantMenu() {
+    this.variantMenu?.remove();
+    this.variantMenu = null;
   }
 
   toolName(t) {
-    for (const grp of PALETTE) {
-      const p = grp.items.find(x => x.id === t);
-      if (p) return p.name;
+    for (const p of PALETTE) {
+      if (p.id === t) return p.name;
+      const v = p.variants?.find(v => v.id === t);
+      if (v) return v.name;
     }
     return t;
   }
 
   setTool(t) {
     this.tool = t;
-    document.querySelectorAll('.piece-btn').forEach(b =>
-      b.classList.toggle('active', b.dataset.tool === t));
-    const isRoof = t && t.startsWith('roof:');
+    document.querySelectorAll('.piece-btn').forEach(b => {
+      const base = b.dataset.item;
+      b.classList.toggle('active', !!t && this.current[base] === t &&
+        (base === t || PALETTE.find(p => p.id === base)?.variants?.some(v => v.id === t)));
+    });
+    const rotates = t && (t.startsWith('roof:') || t === 'wallDiag');
     $('status-tool').textContent = t
-      ? `${this.toolName(t)} — click or drag to place, right-click removes${isRoof ? `, R rotates (slope up: ${DIR_NAMES[this.roofDir]})` : ''}`
+      ? `${this.toolName(t)} — click or drag to place, right-click removes${rotates ? `, R rotates (${t === 'wallDiag' ? 'corner' : 'slope up: ' + DIR_NAMES[this.roofDir]})` : ''}`
       : 'No piece selected — drag to orbit';
     $('hint3d').textContent = t ? `placing: ${this.toolName(t)}` : 'drag to orbit · wheel zooms';
     this.ed3d.setToolMode(!!t);
@@ -90,6 +138,7 @@ class App {
     else if (c.kind === 'wall') changed = placeWall(this.state, c.edge, c.type);
     else if (c.kind === 'roof') changed = placeRoof(this.state, c.i, c.j, c.t, c.dir, c.rk);
     else if (c.kind === 'fixture') changed = placeFixture(this.state, c.fixture);
+    else if (c.kind === 'diag') changed = placeDiag(this.state, c.i, c.j, c.k);
     else if (c.kind === 'drywall') changed = toggleDrywall(this.state, c.edge);
     else if (c.kind === 'erase') changed = this.removeRef(c.target);
     if (!changed) { this.undoStack.pop(); return; }
@@ -115,6 +164,7 @@ class App {
     else if (c.kind === 'wall') el.textContent = c.ok ? `· ${WALL_PIECES[c.type].name} snaps here` : '· needs a floor beside it';
     else if (c.kind === 'roof') el.textContent = c.ok ? `· tier ${c.t}, sloping up ${DIR_NAMES[c.dir]}` : '· needs a wall below its low edge or an adjacent panel';
     else if (c.kind === 'fixture') el.textContent = c.ok ? `· ${FIXTURES[c.fixture.kind].name} fits here` : `· needs a ${FIXTURES[c.fixture.kind].host === 'wall' ? 'plain wall panel' : FIXTURES[c.fixture.kind].host === 'roof' ? 'sloped roof panel' : 'floor module'}`;
+    else if (c.kind === 'diag') el.textContent = c.ok ? '· chamfers this corner (R rotates)' : '· needs a floor cell without a diagonal';
     else if (c.kind === 'drywall') el.textContent = c.ok ? (c.on ? '· click to remove drywall' : '· click to add drywall') : '· click a wall';
     else if (c.kind === 'erase') el.textContent = `· remove ${c.target.kind === 'fixture' ? FIXTURES[c.target.ref.kind].name : c.target.kind}`;
     $('status-pos').textContent = c.i !== undefined ? `cell ${c.i}, ${c.j}` : '';
@@ -212,7 +262,11 @@ class App {
       this.refresh();
     });
     for (const [id, key] of [['layer-structure', 'structure'], ['layer-elec', 'elec'], ['layer-plumb', 'plumb']]) {
-      $(id).addEventListener('change', e => { this.layers2d[key] = e.target.checked; this.ed2d.draw(); });
+      $(id).addEventListener('change', e => {
+        this.layers2d[key] = e.target.checked;
+        this.ed2d.draw();
+        this.ed3d.buildSystems3D(this.state); // wires/pipes share the layer toggles
+      });
     }
     window.addEventListener('keydown', e => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
@@ -220,16 +274,14 @@ class App {
         if (!$('report-overlay').hidden) { $('report-overlay').hidden = true; return; }
         this.setTool(null);
       }
-      if (e.key.toLowerCase() === 'r' && this.tool && this.tool.startsWith('roof:')) {
+      if (e.key.toLowerCase() === 'r' && this.tool && (this.tool.startsWith('roof:') || this.tool === 'wallDiag')) {
         this.roofDir = (this.roofDir + 1) % 4;
         this.setTool(this.tool);
       }
       if (e.key.toLowerCase() === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
       if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey) this.ed2d.fit();
-      for (const grp of PALETTE) {
-        const piece = grp.items.find(p => p.key === e.key);
-        if (piece) this.setTool(piece.id);
-      }
+      const piece = PALETTE.find(p => p.key === e.key);
+      if (piece) this.setTool(this.current[piece.id]);
     });
   }
 }

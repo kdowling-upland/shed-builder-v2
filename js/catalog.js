@@ -11,6 +11,8 @@ export const WALL_PIECES = {
   windowSld:  { name: 'Slider 36×24″',     cls: 'window', ro: [38, 26],   unitSku: 'windowSlider' },
   transom:    { name: 'Transom 36×12″',    cls: 'window', ro: [38, 14],   unitSku: 'windowTransom' },
   ventWall:   { name: 'Wall vent 14×6″',   cls: 'vent',   ro: [14.5, 6.5], unitSku: 'ventLouver' },
+  post:       { name: 'Porch post bay',    cls: 'porch' },
+  railing:    { name: 'Porch railing bay', cls: 'porch' },
 };
 
 // ---- roof / ceiling kinds ----
@@ -32,42 +34,45 @@ export const FIXTURES = {
   skylight: { name: 'Skylight 2×2′',     sys: 'roof',  host: 'roof', sku: 'skylight',   sym: '◍' },
 };
 
-// ---- palette (grouped, Valheim-style build menu) ----
+// ---- palette: flat list of pieces; ▾ variants swap the active type ----
 export const PALETTE = [
-  { group: 'Structure', items: [
-    { id: 'floor',    key: '1', icon: '▦', name: 'Floor 4×4',      desc: 'Framed floor module on skids' },
-    { id: 'wall',     key: '2', icon: '▮', name: 'Wall panel',     desc: '4 ft stud wall, 8 ft tall' },
-    { id: 'roof:r45', key: '3', icon: '◢', name: 'Roof 45°',       desc: 'Steep gable panel, R rotates' },
-    { id: 'roof:r22',  key: '',  icon: '◿', name: 'Roof 22°',      desc: 'Low-slope panel, R rotates' },
-    { id: 'roof:flat', key: '',  icon: '▭', name: 'Flat roof',     desc: 'EPDM ceiling/roof panel' },
+  { id: 'floor', key: '1', icon: '▦', name: 'Floor 4×4', desc: 'Framed floor module on skids' },
+  { id: 'wall', key: '2', icon: '▮', name: 'Wall', desc: '4 ft framed wall, 8 ft tall' },
+  { id: 'wallDiag', key: '', icon: '◣', name: 'Diagonal wall', desc: '45° chamfer wall — R rotates the corner' },
+  { id: 'roof:r45', key: '3', icon: '◢', name: 'Roof', desc: 'R rotates the slope', variants: [
+    { id: 'roof:r45', name: 'Gable 45°', desc: 'Steep 12/12 panel' },
+    { id: 'roof:r22', name: 'Low-slope 22°', desc: '6/12 panel — porch roofs' },
+    { id: 'roof:flat', name: 'Flat / EPDM', desc: 'Membrane ceiling panel' },
   ]},
-  { group: 'Openings', items: [
-    { id: 'wt:door36',   key: '4', icon: '🚪', name: 'Entry door',   desc: '36″ prehung door wall' },
-    { id: 'wt:doorBarn', key: '',  icon: '🛢', name: 'Barn door',    desc: '42″ sliding barn door' },
-    { id: 'wt:doorDutch',key: '',  icon: '⎄',  name: 'Dutch door',   desc: 'Split 36″ door' },
-    { id: 'wt:window36', key: '5', icon: '⊞', name: 'Window 36×36', desc: 'Single-hung window wall' },
-    { id: 'wt:windowSld',key: '',  icon: '⊟', name: 'Slider window', desc: '36×24″ slider, high mount' },
-    { id: 'wt:transom',  key: '',  icon: '▬', name: 'Transom',      desc: '36×12″ light strip up top' },
-    { id: 'wt:ventWall', key: '',  icon: '𝄜', name: 'Wall vent',    desc: '14×6″ louver, fits a stud bay' },
-    { id: 'fx:skylight', key: '',  icon: '◍', name: 'Skylight',     desc: '2×2′ curb skylight on roof' },
+  { id: 'wt:door36', key: '4', icon: '🚪', name: 'Door', desc: 'Door in a framed wall', variants: [
+    { id: 'wt:door36', name: 'Entry door 36″', desc: 'Prehung exterior door' },
+    { id: 'wt:doorBarn', name: 'Barn door 42″', desc: 'Sliding barn door kit' },
+    { id: 'wt:doorDutch', name: 'Dutch door 36″', desc: 'Split top/bottom door' },
   ]},
-  { group: 'Electrical', items: [
-    { id: 'fx:panel',    key: '',  icon: '⚡', name: 'Sub-panel',    desc: '60A panel — needed first' },
-    { id: 'fx:outlet',   key: '',  icon: '⏚', name: 'Outlet',       desc: 'Duplex receptacle, GFCI 1st' },
-    { id: 'fx:switch',   key: '',  icon: '🕹', name: 'Switch',       desc: 'Single-pole light switch' },
-    { id: 'fx:light',    key: '',  icon: '💡', name: 'Ceiling light', desc: 'LED shop light on a cell' },
-    { id: 'fx:extLight', key: '',  icon: '🏮', name: 'Exterior light', desc: 'Wall lantern outside' },
+  { id: 'wt:window36', key: '5', icon: '⊞', name: 'Window', desc: 'Window in a framed wall', variants: [
+    { id: 'wt:window36', name: 'Single-hung 36×36″', desc: 'Standard shed window' },
+    { id: 'wt:windowSld', name: 'Slider 36×24″', desc: 'High-mount slider' },
+    { id: 'wt:transom', name: 'Transom 36×12″', desc: 'Light strip up top' },
   ]},
-  { group: 'Plumbing', items: [
-    { id: 'fx:sink',    key: '', icon: '🚰', name: 'Utility sink', desc: 'Cold supply + drain + AAV' },
-    { id: 'fx:hosebib', key: '', icon: '🚿', name: 'Hose bib',     desc: 'Exterior spigot' },
+  { id: 'wt:ventWall', key: '', icon: '𝄜', name: 'Wall vent', desc: '14×6″ louver, fits a stud bay' },
+  { id: 'fx:skylight', key: '', icon: '◍', name: 'Skylight', desc: '2×2′ curb unit on a sloped roof' },
+  { id: 'wt:post', key: '', icon: '𝅙', name: 'Porch', desc: 'Open bay on posts — carries a roof', variants: [
+    { id: 'wt:post', name: 'Post bay (open)', desc: '4×4 posts, open between' },
+    { id: 'wt:railing', name: 'Railing bay', desc: 'Posts + rails + balusters' },
   ]},
-  { group: 'Interior', items: [
-    { id: 'drywall', key: '', icon: '⬜', name: 'Drywall', desc: 'Click a wall to finish/unfinish the inside face' },
+  { id: 'fx:outlet', key: '', icon: '⚡', name: 'Electrical', desc: 'Wired devices, auto-routed', variants: [
+    { id: 'fx:panel', name: 'Sub-panel 60A', desc: 'Place this first' },
+    { id: 'fx:outlet', name: 'Outlet (duplex)', desc: 'GFCI first in circuit' },
+    { id: 'fx:switch', name: 'Switch', desc: 'Single-pole' },
+    { id: 'fx:light', name: 'Ceiling light', desc: 'LED shop light on a cell' },
+    { id: 'fx:extLight', name: 'Exterior light', desc: 'Wall lantern outside' },
   ]},
-  { group: 'Tools', items: [
-    { id: 'erase', key: '6', icon: '✖', name: 'Remove', desc: 'Delete pieces (or RMB)' },
+  { id: 'fx:sink', key: '', icon: '🚰', name: 'Plumbing', desc: 'Supply + drain, auto-routed', variants: [
+    { id: 'fx:sink', name: 'Utility sink', desc: 'Cold supply, drain + AAV' },
+    { id: 'fx:hosebib', name: 'Hose bib', desc: 'Exterior spigot' },
   ]},
+  { id: 'drywall', key: '', icon: '⬜', name: 'Drywall', desc: 'Click a wall to finish/unfinish inside' },
+  { id: 'erase', key: '6', icon: '✖', name: 'Remove', desc: 'Delete pieces (or RMB)' },
 ];
 
 // ---- price book (approximate big-box retail, USD) ----
@@ -105,6 +110,10 @@ export const PRICE = {
   caulk:         { desc: 'Exterior caulk',                   unit: 'tube',   price: 5.98 },
   adhesive:      { desc: 'Subfloor construction adhesive',   unit: 'tube',   price: 7.48 },
   hTie:          { desc: 'H2.5A hurricane tie',              unit: 'ea',     price: 0.78 },
+  // --- porch ---
+  post4x4:       { desc: '4×4 × 8′ pressure-treated post',   unit: 'ea',     price: 19.98 },
+  postBase:      { desc: 'Post base bracket + anchors',      unit: 'ea',     price: 10.98 },
+  baluster:      { desc: '2×2 × 42″ baluster',               unit: 'ea',     price: 2.10 },
   // --- interior finish ---
   drywallSheet:  { desc: '1/2″ drywall 4×8',                 unit: 'sheet',  price: 14.98 },
   dwScrews:      { desc: 'Drywall screws 1-1/4″ (1 lb)',     unit: 'box',    price: 9.48 },

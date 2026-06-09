@@ -5,7 +5,7 @@
 
 import {
   CELL, WALL_H, FLOOR_TOP, DIRS, DIR_NAMES, riseOf,
-  floorKey, roofKey, wallKey,
+  floorKey, roofKey, wallKey, diagCoveredEdges, diagSegment,
   lowEdgeOfRoof, highEdgeOfRoof, roofHeights, bounds, perimeterEdges,
   gableTriangles,
 } from './store.js';
@@ -86,8 +86,11 @@ export function packCuts(cuts, stocks, kerf = 0) {
 
 // ---------- geometry analysis ----------
 
+const isPorch = (w) => (WALL_PIECES[w.type] || {}).cls === 'porch';
+const isFramed = (w) => w.o !== 'D' && !isPorch(w);
+
 function wallRuns(state) {
-  const walls = Object.values(state.walls);
+  const walls = Object.values(state.walls).filter(isFramed);
   const runs = [];
   for (const o of ['H', 'V']) {
     const groups = {};
@@ -260,7 +263,9 @@ export function buildReport(state, opts = {}) {
 
   const warnings = [];
   const b = bounds(state);
-  const area = floors.length * CELL * CELL;
+  const diagWalls = Object.values(state.walls).filter(w => w.o === 'D');
+  const porchWalls = Object.values(state.walls).filter(isPorch);
+  const area = floors.length * CELL * CELL - diagWalls.length * (CELL * CELL) / 2;
   const runs = wallRuns(state);
   labelRuns(runs, state);
   const corners = countCorners(runs);
@@ -275,8 +280,12 @@ export function buildReport(state, opts = {}) {
   const fixtures = Object.values(state.fixtures || {});
   const skylights = fixtures.filter(f => f.kind === 'skylight');
 
+  const diagCovered = new Set();
+  for (const dw of diagWalls) {
+    for (const e of diagCoveredEdges(dw)) diagCovered.add(wallKey(e.o, e.i, e.j));
+  }
   const missingWalls = perimeterEdges(state)
-    .filter(e => !state.walls[wallKey(e.o, e.i, e.j)]).length;
+    .filter(e => !state.walls[wallKey(e.o, e.i, e.j)] && !diagCovered.has(wallKey(e.o, e.i, e.j))).length;
   if (missingWalls) warnings.push(`${missingWalls} perimeter edge(s) have no wall — the shed is not fully enclosed.`);
   const roofCover = new Set(Object.values(state.roofs).map(r => floorKey(r.i, r.j)));
   const uncovered = floors.filter(c => !roofCover.has(floorKey(c.i, c.j))).length;
@@ -501,7 +510,34 @@ export function buildReport(state, opts = {}) {
         });
       }
 
-      const runSheets = runs.reduce((s, r) => s + Math.ceil(r.lenFt / 4), 0);
+      // diagonal chamfer walls — framed like a short wall with beveled plates
+      if (diagWalls.length) {
+        const dLen = Math.SQRT2 * CELL;
+        const dStuds = diagWalls.length * 5;
+        precutStuds += dStuds;
+        for (const dw of diagWalls) {
+          for (const part of ['bottom plate', 'top plate', 'cap plate']) {
+            plateCuts.push({ len: dLen, label: `${part} — diagonal wall at (${dw.i},${dw.j}) (22.5° bevel both ends)` });
+          }
+        }
+        const dNails = diagWalls.length * 46;
+        addNails('n16d', dNails);
+        ph.steps.push({
+          title: `Frame the ${diagWalls.length} diagonal wall${diagWalls.length > 1 ? 's' : ''} (45° chamfer)`,
+          minutes: 45 * diagWalls.length,
+          detail: [
+            `Each chamfer wall is ${ftIn(dLen)} long. Cut its three plates with a 22.5° bevel on both ends so they nest tightly against the meeting walls.`,
+            `Frame ${5} studs per wall at 16″ o.c. (${dStuds} precut studs total), same nailing as a straight wall — about 46 × 16d each (${dNails} total).`,
+            'Raise after the neighbouring straight walls are braced; nail the beveled plate ends into their end studs.',
+          ],
+          cuts: [`2×4 plates → ${ftIn(dLen)} with 22.5° bevels × ${diagWalls.length * 3}`],
+          nails: [`${dNails} × 16d common`],
+          tools: ['circular saw (bevel set to 22.5°)', 'framing hammer'],
+        });
+      }
+
+      const runSheets = runs.reduce((s, r) => s + Math.ceil(r.lenFt / 4), 0)
+        + diagWalls.length * 2;
       const gableArea = gables.reduce((s, g) => s + g.area, 0);
       const gableSheets = Math.ceil((gableArea / 32) * waste);
       wallSheets = runSheets + gableSheets;
@@ -532,6 +568,58 @@ export function buildReport(state, opts = {}) {
     if (plateCuts.length) cutPlans.push({ title: 'Wall plates — 2×4', pack: platePack });
     if (studCutPool.length) cutPlans.push({ title: 'Opening parts — 2×4', pack: openPack });
     if (headerCuts.length) cutPlans.push({ title: 'Headers — 2×6', pack: headerPack });
+  }
+
+  // ---------------- porch posts & railing ----------------
+  if (porchWalls.length) {
+    const ph = phase('Porch posts & railing');
+    const ends = new Set();
+    for (const w of porchWalls) {
+      if (w.o === 'H') { ends.add(`${w.i},${w.j}`); ends.add(`${w.i + 1},${w.j}`); }
+      else { ends.add(`${w.i},${w.j}`); ends.add(`${w.i},${w.j + 1}`); }
+    }
+    const posts = ends.size;
+    const railBays = porchWalls.filter(w => w.type === 'railing').length;
+    addItem('post4x4', posts, 'Porch');
+    addItem('postBase', posts, 'Porch');
+    addNails('n16d', posts * 6);
+    ph.steps.push({
+      title: `Set ${posts} porch post${posts > 1 ? 's' : ''}`,
+      minutes: 20 * posts,
+      detail: [
+        `Anchor a post base bracket at each post location through the deck into the rim/joist below (hardware included with the brackets).`,
+        `Stand each 4×4 post, plumb it both ways, brace with scrap, then fasten to the base; toenail the top to the porch beam/roof framing with 6 × 16d (${posts * 6} total).`,
+        'Cut posts to length only after the roof line is strung — measure each one.',
+      ],
+      cuts: [`4×4 post → trim to ~8′ at the roof line × ${posts}`],
+      nails: [`${posts * 6} × 16d common`],
+      tools: ['post level', 'drill/driver', 'circular saw'],
+    });
+    if (railBays) {
+      const balusters = railBays * 9;
+      const railLF = railBays * CELL * 2;
+      const railPack = packCuts(
+        Array.from({ length: railBays * 2 }, (_, k) => ({ len: CELL, label: `porch rail ${k % 2 ? '(top)' : '(bottom)'}` })),
+        STOCK_2X4);
+      for (const [sku, q] of Object.entries(railPack.buy)) addItem(sku, q, 'Porch');
+      cutPlans.push({ title: 'Porch rails — 2×4', pack: railPack });
+      addItem('baluster', balusters, 'Porch');
+      const railNails = railBays * 8, balNails = balusters * 4;
+      addNails('n16d', railNails);
+      addNails('finish', balNails);
+      ph.steps.push({
+        title: `Build ${railBays} railing bay${railBays > 1 ? 's' : ''}`,
+        minutes: 30 * railBays,
+        detail: [
+          `Cut top and bottom rails to fit each bay (${railLF}′ of 2×4 total); fasten to the posts with 4 × 16d per rail end (${railNails}).`,
+          `Space ${balusters} balusters evenly — gaps must be under 4″ (about 9 per 4′ bay) — 2 finish nails top and bottom each (${balNails}).`,
+          'Keep the railing top at 36″ above the deck.',
+        ],
+        cuts: [`2×4 rail → ${ftIn(CELL)} × ${railBays * 2}`, `2×2 baluster → 30″ × ${balusters}`],
+        nails: [`${railNails} × 16d common`, `${balNails} × 8d finish`],
+        tools: ['miter saw', 'spacer block', 'finish hammer'],
+      });
+    }
   }
 
   // ---------------- PHASE 4 — roof ----------------
@@ -861,7 +949,7 @@ export function buildReport(state, opts = {}) {
   }
 
   // ---------------- cost rollup ----------------
-  const catOrder = ['Foundation & floor', 'Wall framing', 'Sheathing', 'Roofing',
+  const catOrder = ['Foundation & floor', 'Wall framing', 'Porch', 'Sheathing', 'Roofing',
     'Doors & windows', 'Electrical', 'Plumbing', 'Interior finish',
     'Fasteners & hardware', 'Trim & finish'];
   const categories = catOrder
@@ -897,6 +985,8 @@ export function buildReport(state, opts = {}) {
       sinks: fixtures.filter(f => f.kind === 'sink').length,
     },
     hasDrywall: drywalled.length > 0,
+    hasRailing: porchWalls.some(w => w.type === 'railing'),
+    hasPorch: porchWalls.length > 0,
   };
   const code = runCodeChecks(codeCtx, regionId);
 
@@ -909,6 +999,7 @@ export function buildReport(state, opts = {}) {
       roofPanels: Object.keys(state.roofs).length,
       doors: doors.length, windows: windows.length, vents: vents.length,
       corners, skylights: skylights.length,
+      diagWalls: diagWalls.length, porchBays: porchWalls.length,
       elecDevices: elec.counts.devices || 0,
       plumbFixtures: plumb.counts.fixtures || 0,
       roofSquares: squares, epdmArea, nailGrand,

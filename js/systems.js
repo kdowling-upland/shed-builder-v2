@@ -129,12 +129,15 @@ export function plumbingDesign(state) {
   let pvcFt = 0;
   for (const s of sinks) {
     const pos = fixturePos(s);
-    let dd = Infinity;
+    let dd = Infinity, stub = pos;
     for (const e of perimeterEdges(state)) {
       const [ax, az, bx, bz] = edgeSegment(e);
-      dd = Math.min(dd, manhattan(pos, { x: (ax + bx) / 2, z: (az + bz) / 2 }));
+      const mid = { x: (ax + bx) / 2, z: (az + bz) / 2 };
+      const d = manhattan(pos, mid);
+      if (d < dd) { dd = d; stub = mid; }
     }
     pvcFt += Math.ceil(dd + 4);
+    out.routes.push({ sys: 'plumb', kind: 'drain', path: lPath(pos, stub) });
   }
 
   const add = (sku, qty) => qty > 0 && out.items.push({ sku, qty, cat: 'Plumbing' });

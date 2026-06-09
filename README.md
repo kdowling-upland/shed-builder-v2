@@ -28,10 +28,12 @@ When the design is done, the built-in **report engine** computes:
 | Piece | Snap rule |
 |---|---|
 | Floor 4×4 | grid; must touch an existing floor module |
-| Wall panels — plain, entry/barn/dutch door, 3 window types, louver vent | snap to floor edges, 8 ft tall |
-| Roof panels — 45° gable, 22° low-slope, flat/EPDM | tier 0 bears on a wall; panels stack up the slope; opposing slopes form a ridge; gable triangles are framed automatically |
+| Wall panels — plain, entry/barn/dutch door, 3 window types, louver vent (pick variants with the ▾ arrow) | snap to floor edges, 8 ft tall; real stud framing shown inside until drywall is applied |
+| Diagonal wall | chamfers a floor cell at 45° (non-90° corners) |
+| Porch post / railing bays | open bays on 4×4 posts that carry roof panels — deck + posts + low-slope roof = porch |
+| Roof panels — 45° gable, 22° low-slope, flat/EPDM | tier 0 bears on a wall or post bay; panels stack up the slope; opposing slopes form a ridge; gable triangles are framed automatically |
 | Skylight | on a sloped roof panel |
-| Electrical — sub-panel, outlets (GFCI-first), switches, interior/exterior lights | on walls / ceiling cells; circuits auto-route to the panel |
+| Electrical — sub-panel, outlets (GFCI-first), switches, interior/exterior lights | on walls / ceiling cells; circuits auto-route to the panel and render in both views |
 | Plumbing — utility sink, hose bib | on walls; supply/drain runs auto-route to a stub-out |
 
 ## Controls
