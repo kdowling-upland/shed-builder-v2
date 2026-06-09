@@ -297,9 +297,23 @@ export function deserialize(json) {
     if (d && d.floors && d.walls && d.roofs) {
       Object.assign(s, { fixtures: {} }, d);
       for (const r of Object.values(s.roofs)) if (!r.kind) r.kind = 'r45';
+      // migrate v1 wall types; never let an unknown type into the state
+      const rename = { door: 'door36', window: 'window36' };
+      for (const w of Object.values(s.walls)) {
+        if (rename[w.type]) w.type = rename[w.type];
+        if (!WALL_PIECES[w.type]) w.type = 'solid';
+      }
     }
   } catch { /* fall back to empty */ }
   return s;
+}
+
+// drywall is a per-wall interior finish flag, toggled by the drywall tool
+export function toggleDrywall(state, e) {
+  const w = state.walls[wallKey(e.o, e.i, e.j)];
+  if (!w) return false;
+  w.drywall = !w.drywall;
+  return true;
 }
 
 // Demo: 8×12 gable shed with a door, windows, and wired/plumbed interior
@@ -328,5 +342,6 @@ export function demoShed() {
   placeFixture(s, { kind: 'sink', o: 'V', i: 0, j: 0 });
   placeFixture(s, { kind: 'hosebib', o: 'H', i: 0, j: 2 });
   placeFixture(s, { kind: 'skylight', i: 2, j: 1, t: 0 });
+  toggleDrywall(s, { o: 'V', i: 0, j: 0 }); // show one finished interior wall
   return s;
 }

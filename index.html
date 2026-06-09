@@ -68,6 +68,7 @@
           <label class="layer-toggle"><input type="checkbox" id="layer-structure" checked> structure</label>
           <label class="layer-toggle"><input type="checkbox" id="layer-elec" checked> electrical</label>
           <label class="layer-toggle"><input type="checkbox" id="layer-plumb" checked> plumbing</label>
+          <button id="btn-fit2d" class="vp-btn" title="Center the view on the shed (F)">⌖ Fit</button>
           <span class="vp-hint">click to build here too</span>
         </div>
         <canvas id="vp2d"></canvas>
@@ -77,8 +78,8 @@
     <!-- ===== Right: inspector ===== -->
     <aside id="inspector">
       <h2>Inspector</h2>
-      <div class="insp-section">
-        <h3>Shed stats</h3>
+      <details class="insp-section" open>
+        <summary>Shed stats</summary>
         <table id="stats-table">
           <tr><td>Floor area</td><td id="st-area">—</td></tr>
           <tr><td>Footprint / peak</td><td id="st-bbox">—</td></tr>
@@ -89,20 +90,16 @@
           <tr class="hl"><td>Est. material cost</td><td id="st-cost">—</td></tr>
           <tr><td>Est. build time</td><td id="st-time">—</td></tr>
         </table>
-      </div>
-      <div class="insp-section">
-        <h3>View</h3>
+      </details>
+      <details class="insp-section">
+        <summary>View options</summary>
         <label class="field"><span>Structural stress colors</span>
           <input type="checkbox" id="opt-stress">
         </label>
         <p class="dim">Green = solidly supported, red = about to fail. Pieces with no support collapse automatically.</p>
-      </div>
-      <div class="insp-section">
-        <h3>Selected piece</h3>
-        <div id="sel-info" class="dim">Pick a piece from the palette, then hover a viewport.</div>
-      </div>
-      <div class="insp-section">
-        <h3>Estimate &amp; code settings</h3>
+      </details>
+      <details class="insp-section">
+        <summary>Estimate &amp; code settings</summary>
         <label class="field">Region (code check)
           <select id="opt-region"></select>
         </label>
@@ -113,7 +110,7 @@
           <input type="number" id="opt-waste" value="10" min="0" max="30" step="1">
         </label>
         <p class="dim">Prices are typical big-box store estimates. The code check is guidance, not a permit review.</p>
-      </div>
+      </details>
       <div class="insp-section" id="warn-box" hidden>
         <h3>⚠ Warnings</h3>
         <ul id="warn-list"></ul>
@@ -123,6 +120,7 @@
 
   <footer id="statusbar">
     <span id="status-tool">No piece selected — orbit mode</span>
+    <span id="sel-info" class="dim"></span>
     <span class="grow"></span>
     <span id="status-pos"></span>
   </footer>

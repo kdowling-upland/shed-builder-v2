@@ -62,6 +62,9 @@ export const PALETTE = [
     { id: 'fx:sink',    key: '', icon: '🚰', name: 'Utility sink', desc: 'Cold supply + drain + AAV' },
     { id: 'fx:hosebib', key: '', icon: '🚿', name: 'Hose bib',     desc: 'Exterior spigot' },
   ]},
+  { group: 'Interior', items: [
+    { id: 'drywall', key: '', icon: '⬜', name: 'Drywall', desc: 'Click a wall to finish/unfinish the inside face' },
+  ]},
   { group: 'Tools', items: [
     { id: 'erase', key: '6', icon: '✖', name: 'Remove', desc: 'Delete pieces (or RMB)' },
   ]},
@@ -102,6 +105,11 @@ export const PRICE = {
   caulk:         { desc: 'Exterior caulk',                   unit: 'tube',   price: 5.98 },
   adhesive:      { desc: 'Subfloor construction adhesive',   unit: 'tube',   price: 7.48 },
   hTie:          { desc: 'H2.5A hurricane tie',              unit: 'ea',     price: 0.78 },
+  // --- interior finish ---
+  drywallSheet:  { desc: '1/2″ drywall 4×8',                 unit: 'sheet',  price: 14.98 },
+  dwScrews:      { desc: 'Drywall screws 1-1/4″ (1 lb)',     unit: 'box',    price: 9.48 },
+  jointCompound: { desc: 'Joint compound (3.5 gal)',         unit: 'pail',   price: 16.98 },
+  dwTape:        { desc: 'Paper joint tape 250′',            unit: 'roll',   price: 5.98 },
   // --- electrical ---
   panel60:       { desc: '60A sub-panel (8 space)',          unit: 'ea',     price: 86.00 },
   breaker20:     { desc: '20A single-pole breaker',          unit: 'ea',     price: 12.50 },

@@ -24,6 +24,7 @@ export function candidateSlot(c) {
     case 'floor': return `f:${c.i},${c.j}`;
     case 'wall': return `w:${c.edge.o},${c.edge.i},${c.edge.j}`;
     case 'roof': return `r:${c.i},${c.j},${c.t}`;
+    case 'drywall': return `d:${c.edge.o},${c.edge.i},${c.edge.j}`;
     case 'fixture': return `x:${fixtureKey(c.fixture)}`;
     case 'erase': return `e:${c.target.kind}:${JSON.stringify(c.target.ref)}`;
     default: return null;
@@ -62,6 +63,11 @@ export function candidateAt(state, tool, x, z, roofDir) {
       fixture = { kind: fk, i, j, t: Math.max(top, 0), host: 'roof' };
     }
     return { kind: 'fixture', fixture, ok: canPlaceFixture(state, fixture) };
+  }
+  if (tool === 'drywall') {
+    const { edge } = nearestEdge(x, z, i, j);
+    const w = state.walls[wallKey(edge.o, edge.i, edge.j)];
+    return { kind: 'drywall', edge, ok: !!w, on: !!(w && w.drywall) };
   }
   if (tool === 'erase') {
     return eraseTargetAt(state, x, z);

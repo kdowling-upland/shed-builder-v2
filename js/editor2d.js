@@ -1,6 +1,6 @@
 // editor2d.js — top-down plan view: structure, electrical and plumbing
 // layers with standard plan symbols. Fully interactive (same tools as 3D).
-import { CELL, DIRS, edgeSegment, wallKey } from './store.js';
+import { CELL, DIRS, edgeSegment, wallKey, bounds } from './store.js';
 import { WALL_PIECES, FIXTURES } from './catalog.js';
 import { candidateAt, candidateSlot, eraseTargetAt } from './picker.js';
 import { electricalDesign, plumbingDesign, fixturePos } from './systems.js';
@@ -43,10 +43,27 @@ export class Editor2D {
     this.canvas.width = r.width * devicePixelRatio;
     this.canvas.height = r.height * devicePixelRatio;
     this.ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-    if (!this.centered) {
-      this.origin = { x: r.width / 2 - 6 * this.scale, y: r.height / 2 - 4 * this.scale };
-      this.centered = true;
+    if (!this.centered) { this.fit(); return; }
+    this.draw();
+  }
+
+  // center & zoom the view on the structure (or origin if empty)
+  fit() {
+    const r = this.canvas.parentElement.getBoundingClientRect();
+    const b = bounds(this.app.state);
+    if (!b) {
+      this.scale = 16;
+      this.origin = { x: r.width / 2, y: r.height / 2 };
+    } else {
+      const pad = 60;
+      this.scale = Math.min(
+        (r.width - pad) / Math.max(b.w, CELL),
+        (r.height - pad) / Math.max(b.d, CELL), 40);
+      this.scale = Math.max(this.scale, 3);
+      const cx = (b.i0 * CELL + b.w / 2), cz = (b.j0 * CELL + b.d / 2);
+      this.origin = { x: r.width / 2 - cx * this.scale, y: r.height / 2 - cz * this.scale };
     }
+    this.centered = true;
     this.draw();
   }
 
@@ -150,10 +167,11 @@ export class Editor2D {
         ctx.fillText(`t${r.t}${r.kind === 'r22' ? '·22°' : r.kind === 'flat' ? '·flat' : ''}`, px + 4, py + 12);
       }
       for (const w of Object.values(state.walls)) {
-        const cls = WALL_PIECES[w.type].cls;
+        const cls = (WALL_PIECES[w.type] || WALL_PIECES.solid).cls;
         const col = cls === 'door' ? '#c98a3d' : cls === 'window' ? '#79c4e0'
           : cls === 'vent' ? '#9b86c9' : '#e8dcc0';
         this.wallLine(w, col, 5);
+        if (w.drywall) this.wallLine(w, '#fdfaf2', 1.5);
       }
     }
 
@@ -195,7 +213,7 @@ export class Editor2D {
         ctx.lineWidth = 2;
         ctx.strokeRect(px, py, s, s);
         if (h.kind === 'roof') this.arrow(px + s / 2, py + s / 2, h.dir, s * 0.3, col);
-      } else if (h.kind === 'wall') {
+      } else if (h.kind === 'wall' || h.kind === 'drywall') {
         this.wallLine({ ...h.edge }, col, 6);
       } else if (h.kind === 'fixture' && h.fixture) {
         const pos = fixturePos(h.fixture);

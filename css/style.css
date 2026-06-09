@@ -50,8 +50,26 @@ h3 { font-size: 12px; margin: 0 0 6px; color: var(--txt); }
   width: 215px; flex: 0 0 auto; background: var(--bg1);
   border-right: 1px solid var(--line); padding: 10px; overflow-y: auto;
 }
-#palette-list { display: flex; flex-direction: column; gap: 6px; }
-.palette-group { margin: 8px 0 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); border-bottom: 1px solid var(--bg3); padding-bottom: 2px; }
+#palette-list { display: flex; flex-direction: column; gap: 4px; }
+.palette-details { display: flex; flex-direction: column; gap: 5px; }
+.palette-group {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--dim); border-bottom: 1px solid var(--bg3);
+  padding: 6px 0 3px; cursor: pointer; user-select: none; list-style: none;
+}
+.palette-group::before { content: '▸ '; }
+details[open] > .palette-group::before { content: '▾ '; }
+summary::-webkit-details-marker { display: none; }
+details.insp-section > summary {
+  font-size: 12px; cursor: pointer; user-select: none; list-style: none;
+  color: var(--txt); font-weight: 600;
+}
+details.insp-section > summary::before { content: '▸ '; color: var(--dim); }
+details[open].insp-section > summary::before { content: '▾ '; }
+details.insp-section > summary ~ * { margin-top: 8px; }
+.vp-btn {
+  pointer-events: auto; padding: 1px 8px; font-size: 11px; margin-left: 12px;
+}
 .piece-btn {
   display: flex; align-items: center; gap: 10px; width: 100%;
   text-align: left; padding: 8px 10px; background: var(--bg2);
@@ -115,6 +133,7 @@ h3 { font-size: 12px; margin: 0 0 6px; color: var(--txt); }
   background: var(--bg2); border-top: 1px solid var(--line);
   font-size: 11px; color: var(--dim);
 }
+#sel-info { color: var(--acc2); }
 
 /* ===== report overlay ===== */
 #report-overlay {

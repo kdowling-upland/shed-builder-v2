@@ -54,6 +54,7 @@ export class Editor3D {
       door: lam({ map: T.door }),
       epdm: lam({ map: T.epdm }),
       glass: lam({ color: 0xbcd9ea, transparent: true, opacity: 0.45 }),
+      drywall: lam({ color: 0xe9e4da }),
       trim: lam({ color: 0xf0ebdd }),
       white: lam({ color: 0xe8e8e8 }),
       metal: lam({ color: 0x8b9097 }),
@@ -143,10 +144,11 @@ export class Editor3D {
     for (const [k, w] of Object.entries(state.walls)) {
       const g = stress
         ? this.simpleWall(w, tint(support.walls[k] ?? 0))
-        : this.wallMesh(w);
+        : this.wallMesh(w, state);
       g.userData = { kind: 'wall', ref: w };
       this.pieceGroup.add(g);
     }
+    if (!stress) this.addCornerBoards(state);
     for (const [k, r] of Object.entries(state.roofs)) {
       const g = stress
         ? this.roofSlab(r, tint(support.roofs[k] ?? 0))
@@ -200,73 +202,170 @@ export class Editor3D {
       horiz ? CELL : 0.4, WALL_H, horiz ? 0.4 : CELL, mat);
   }
 
-  // detailed wall: siding body + per-type door/window/vent detail
-  wallMesh(w) {
-    const spec = WALL_PIECES[w.type];
+  // a skin (siding/drywall) covering the wall face, with an optional
+  // rectangular hole (door/window opening) cut out of it
+  addSkin(g, z, th, mat, hole) {
+    const put = (x0, x1, y0, y1) => {
+      if (x1 - x0 < 0.02 || y1 - y0 < 0.02) return;
+      const m = this.box(x1 - x0, y1 - y0, th, mat);
+      m.position.set((x0 + x1) / 2, (y0 + y1) / 2, z);
+      g.add(m);
+    };
+    const top = Y0 + WALL_H;
+    if (!hole) { put(-2, 2, Y0, top); return; }
+    put(-2, hole.x0, Y0, top);
+    put(hole.x1, 2, Y0, top);
+    put(hole.x0, hole.x1, hole.y1, top);
+    put(hole.x0, hole.x1, Y0, hole.y0);
+  }
+
+  // real framed wall: plates, studs @16″ o.c., kings/jacks/header at
+  // openings — visible from inside unless drywall is applied.
+  wallMesh(w, state) {
+    const spec = WALL_PIECES[w.type] || WALL_PIECES.solid;
     const g = new THREE.Group();
-    const th = 0.4;
+    const SD = 0.3, ST = 0.125;        // stud depth 3.5″, lumber 1.5″
+    const top = Y0 + WALL_H;
 
-    const body = this.box(CELL, WALL_H, th, this.M.siding);
-    body.position.y = Y0 + WALL_H / 2;
-    g.add(body);
+    const cells = cellsOfEdge(w);
+    const f1 = !!state.floors[floorKey(cells[1].i, cells[1].j)];
+    const f0 = !!state.floors[floorKey(cells[0].i, cells[0].j)];
+    const intS = f1 ? 1 : -1;          // interior is local +z when the floor is on cells[1]
+    const partition = f0 && f1;
 
+    // opening geometry in local coords
+    let hole = null, yTop = 0, yBot = 0, hw = 0;
+    if (spec.cls === 'door' || spec.cls === 'window') {
+      hw = spec.ro[0] / 24;
+      yTop = Y0 + 82.5 / 12;
+      yBot = spec.cls === 'door' ? Y0 : yTop - spec.ro[1] / 12;
+      hole = { x0: -hw, x1: hw, y0: yBot, y1: yTop };
+    }
+
+    // plates
+    g.add(this.boxPiece(0, Y0 + ST / 2, 0, CELL, ST, SD, this.M.lumber));
+    g.add(this.boxPiece(0, top - ST * 1.5, 0, CELL, ST, SD, this.M.lumber));
+    g.add(this.boxPiece(0, top - ST / 2, 0, CELL, ST, SD, this.M.lumber));
+
+    // studs @ 16″ o.c. (skip the ones inside an opening)
+    const studH = WALL_H - 3 * ST;
+    const studY = Y0 + ST + studH / 2;
+    for (const sx of [-2 + ST / 2, -2 + 16 / 12, -2 + 32 / 12, 2 - ST / 2]) {
+      if (hole && sx > -hw - 0.07 && sx < hw + 0.07) continue;
+      g.add(this.boxPiece(sx, studY, 0, ST, studH, SD, this.M.lumber));
+    }
+
+    if (hole) {
+      // jacks, header, cripples (and sill for windows)
+      const jackH = yTop - (Y0 + ST);
+      for (const s of [-1, 1]) {
+        g.add(this.boxPiece(s * (hw + ST / 2), Y0 + ST + jackH / 2, 0, ST, jackH, SD, this.M.lumber));
+        g.add(this.boxPiece(s * (hw + ST * 1.5), studY, 0, ST, studH, SD, this.M.lumber));
+      }
+      const hdrW = 2 * hw + 2 * ST;
+      g.add(this.boxPiece(0, yTop + 0.23, 0, hdrW, 0.46, SD, this.M.lumber));
+      const cripH = (top - 3 * ST) - (yTop + 0.46);
+      if (cripH > 0.05) {
+        for (const cx of [-0.6, 0.6]) {
+          g.add(this.boxPiece(cx, yTop + 0.46 + cripH / 2, 0, ST, cripH, SD, this.M.lumber));
+        }
+      }
+      if (spec.cls === 'window') {
+        g.add(this.boxPiece(0, yBot - ST / 2, 0, 2 * hw, ST, SD, this.M.lumber));
+        const scH = yBot - ST - (Y0 + ST);
+        for (const cx of [-0.7, 0, 0.7]) {
+          if (scH > 0.05) g.add(this.boxPiece(cx, Y0 + ST + scH / 2, 0, ST, scH, SD, this.M.lumber));
+        }
+      }
+    }
+
+    // exterior siding skin (perimeter walls only; partitions stay open)
+    if (!partition) {
+      this.addSkin(g, -intS * (SD / 2 + 0.05), 0.09, this.M.siding, hole);
+    }
+    // interior drywall if finished
+    if (w.drywall) {
+      this.addSkin(g, intS * (SD / 2 + 0.04), 0.06, this.M.drywall, hole);
+    }
+
+    // door / window / vent units
     if (spec.cls === 'door') {
-      const dw = spec.ro[0] / 12 - 0.2, dh = spec.ro[1] / 12 - 0.15;
-      const frame = this.box(dw + 0.35, dh + 0.2, th + 0.1, this.M.trim);
-      frame.position.set(0, Y0 + dh / 2 + 0.1, 0);
+      const dw = 2 * hw - 0.05, dh = yTop - yBot - 0.05;
+      const frame = this.box(dw + 0.3, dh + 0.18, SD + 0.22, this.M.trim);
+      frame.position.set(0, (yTop + yBot) / 2 + 0.04, 0);
       g.add(frame);
       if (w.type === 'doorBarn') {
-        const slab = this.box(dw + 0.5, dh, 0.18, this.M.door);
-        slab.position.set(0.3, Y0 + dh / 2, th / 2 + 0.22);
+        const zOut = -intS * (SD / 2 + 0.28);
+        const slab = this.box(dw + 0.5, dh, 0.16, this.M.door);
+        slab.position.set(0.3, (yTop + yBot) / 2, zOut);
         g.add(slab);
-        const rail = this.box(dw + 1.6, 0.16, 0.12, this.M.metal);
-        rail.position.set(0, Y0 + dh + 0.25, th / 2 + 0.28);
+        const rail = this.box(dw + 1.6, 0.15, 0.1, this.M.metal);
+        rail.position.set(0, yTop + 0.3, zOut);
         g.add(rail);
       } else if (w.type === 'doorDutch') {
         for (const [y0f, hf] of [[0, 0.48], [0.52, 0.48]]) {
           const slab = this.box(dw, dh * hf, 0.12, this.M.door);
-          slab.position.set(0, Y0 + dh * (y0f + hf / 2), th / 2 + 0.04);
+          slab.position.set(0, yBot + dh * (y0f + hf / 2), 0);
           g.add(slab);
         }
-        const knob = this.box(0.12, 0.12, 0.12, this.M.metal);
-        knob.position.set(dw / 2 - 0.25, Y0 + dh * 0.55, th / 2 + 0.14);
+        const knob = this.box(0.12, 0.12, 0.2, this.M.metal);
+        knob.position.set(dw / 2 - 0.25, yBot + dh * 0.55, 0);
         g.add(knob);
       } else {
         const slab = this.box(dw, dh, 0.12, this.M.door);
-        slab.position.set(0, Y0 + dh / 2, th / 2 + 0.04);
+        slab.position.set(0, yBot + dh / 2, 0);
         g.add(slab);
-        const knob = this.box(0.12, 0.3, 0.12, this.M.metal);
-        knob.position.set(dw / 2 - 0.3, Y0 + dh * 0.45, th / 2 + 0.12);
+        const knob = this.box(0.12, 0.3, 0.2, this.M.metal);
+        knob.position.set(dw / 2 - 0.3, yBot + dh * 0.45, 0);
         g.add(knob);
       }
     } else if (spec.cls === 'window') {
-      const ww = spec.ro[0] / 12 - 0.1, wh = spec.ro[1] / 12 - 0.1;
-      const cy = Y0 + (82.5 - spec.ro[1] / 2) / 12;
-      const frame = this.box(ww + 0.3, wh + 0.3, th + 0.14, this.M.trim);
+      const ww = 2 * hw - 0.05, wh = yTop - yBot - 0.05;
+      const cy = (yTop + yBot) / 2;
+      const frame = this.box(ww + 0.28, wh + 0.28, SD + 0.24, this.M.trim);
       frame.position.set(0, cy, 0);
       g.add(frame);
-      const glass = this.box(ww, wh, th + 0.16, this.M.glass);
+      const glass = this.box(ww, wh, SD + 0.26, this.M.glass);
       glass.position.set(0, cy, 0);
       g.add(glass);
-      const mullV = this.box(0.07, wh, th + 0.18, this.M.trim);
+      const mullV = this.box(0.07, wh, SD + 0.28, this.M.trim);
       mullV.position.set(0, cy, 0);
       g.add(mullV);
-      const mullH = this.box(ww, 0.07, th + 0.18, this.M.trim);
+      const mullH = this.box(ww, 0.07, SD + 0.28, this.M.trim);
       mullH.position.set(0, cy, 0);
       g.add(mullH);
     } else if (spec.cls === 'vent') {
-      const louver = this.box(spec.ro[0] / 12, spec.ro[1] / 12, th + 0.12, this.M.dark);
-      louver.position.set(0, Y0 + 1.6, 0);
+      const zOut = -intS * (SD / 2 + 0.12);
+      const louver = this.box(spec.ro[0] / 12, spec.ro[1] / 12, 0.14, this.M.dark);
+      louver.position.set(0, Y0 + 1.6, zOut);
       g.add(louver);
       for (let k = -1; k <= 1; k++) {
-        const slat = this.box(spec.ro[0] / 12 + 0.06, 0.05, th + 0.16, this.M.trim);
-        slat.position.set(0, Y0 + 1.6 + k * 0.16, 0);
+        const slat = this.box(spec.ro[0] / 12 + 0.06, 0.05, 0.18, this.M.trim);
+        slat.position.set(0, Y0 + 1.6 + k * 0.16, zOut);
         g.add(slat);
       }
     }
 
     this.placeOnEdge(g, w);
     return g;
+  }
+
+  // vertical 1×4 corner boards where perimeter walls meet — hides the
+  // panel seam and reads like real corner trim
+  addCornerBoards(state) {
+    const pts = { H: new Set(), V: new Set() };
+    for (const w of Object.values(state.walls)) {
+      if (w.o === 'H') { pts.H.add(`${w.i},${w.j}`); pts.H.add(`${w.i + 1},${w.j}`); }
+      else { pts.V.add(`${w.i},${w.j}`); pts.V.add(`${w.i},${w.j + 1}`); }
+    }
+    for (const p of pts.H) {
+      if (!pts.V.has(p)) continue;
+      const [i, j] = p.split(',').map(Number);
+      const post = this.box(0.36, WALL_H, 0.36, this.M.trim);
+      post.position.set(i * CELL, Y0 + WALL_H / 2, j * CELL);
+      post.userData = { kind: 'gable' }; // decorative: not erasable
+      this.pieceGroup.add(post);
+    }
   }
 
   placeOnEdge(group, e) {
@@ -298,14 +397,23 @@ export class Editor3D {
     return m;
   }
 
+  // roof panel: thin sheathing skinned with shingles/EPDM, carried on
+  // visible 2×6 rafters underneath
   roofMesh(r) {
     const top = r.kind === 'flat' ? this.M.epdm : this.M.shingle;
     const mats = [this.M.trim, this.M.trim, top, this.M.lumber, this.M.trim, this.M.trim];
     const { pos, rot, slopeLen } = this.roofTransform(r);
-    const m = this.box(slopeLen + 0.15, 0.32, CELL, mats);
-    m.position.copy(pos);
-    m.rotation.copy(rot);
-    return m;
+    const g = new THREE.Group();
+    const deck = this.box(slopeLen + 0.15, 0.18, CELL, mats);
+    g.add(deck);
+    for (const lz of [-CELL / 2 + 0.1, 0, CELL / 2 - 0.1]) {
+      const raf = this.box(slopeLen, 0.46, 0.125, this.M.lumber);
+      raf.position.set(0, -0.31, lz);
+      g.add(raf);
+    }
+    g.position.copy(pos);
+    g.rotation.copy(rot);
+    return g;
   }
 
   gableMesh(g) {
@@ -406,7 +514,7 @@ export class Editor3D {
   collapse(deadPieces) {
     for (const d of deadPieces) {
       let mesh = null;
-      if (d.kind === 'wall') mesh = this.wallMesh(d.ref);
+      if (d.kind === 'wall') mesh = this.wallMesh(d.ref, this.app.state);
       else if (d.kind === 'roof') mesh = this.roofMesh(d.ref);
       else if (d.kind === 'floor') mesh = this.floorMesh(d.ref);
       if (!mesh) continue;
@@ -500,6 +608,9 @@ export class Editor3D {
     this.ghostMat.color.set(h.ok ? 0x4ad66d : 0xe05555);
     if (h.kind === 'floor') {
       this.ghost = this.boxPiece(h.i * CELL + 2, Y0 / 2, h.j * CELL + 2, CELL, Y0, CELL, this.ghostMat);
+    } else if (h.kind === 'drywall') {
+      this.ghost = this.simpleWall({ ...h.edge }, this.ghostMat);
+      this.ghost.scale.set(1, 0.98, 0.6);
     } else if (h.kind === 'wall') {
       this.ghost = this.simpleWall({ ...h.edge }, this.ghostMat);
     } else if (h.kind === 'roof') {

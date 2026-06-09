@@ -1,7 +1,7 @@
 // main.js — application shell: tool state, undo, persistence, UI wiring.
 import {
   emptyState, demoShed, serialize, deserialize, DIR_NAMES, bounds,
-  placeFloor, placeWall, placeRoof, placeFixture,
+  placeFloor, placeWall, placeRoof, placeFixture, toggleDrywall,
   removeFloor, removeWall, removeRoof, removeFixture,
   collapseUnsupported, computeSupport,
 } from './store.js';
@@ -41,18 +41,22 @@ class App {
   buildPalette() {
     const list = $('palette-list');
     for (const grp of PALETTE) {
-      const h = document.createElement('div');
-      h.className = 'palette-group';
-      h.textContent = grp.group;
-      list.appendChild(h);
+      const det = document.createElement('details');
+      det.className = 'palette-details';
+      det.open = ['Structure', 'Openings'].includes(grp.group);
+      const sum = document.createElement('summary');
+      sum.className = 'palette-group';
+      sum.textContent = grp.group;
+      det.appendChild(sum);
       for (const p of grp.items) {
         const b = document.createElement('button');
         b.className = 'piece-btn';
         b.dataset.tool = p.id;
         b.innerHTML = `<span class="pi">${p.icon}</span><span><span class="pn">${p.name}</span><span class="pd">${p.desc}</span></span>${p.key ? `<span class="pk">${p.key}</span>` : ''}`;
         b.addEventListener('click', () => this.setTool(this.tool === p.id ? null : p.id));
-        list.appendChild(b);
+        det.appendChild(b);
       }
+      list.appendChild(det);
     }
   }
 
@@ -86,6 +90,7 @@ class App {
     else if (c.kind === 'wall') changed = placeWall(this.state, c.edge, c.type);
     else if (c.kind === 'roof') changed = placeRoof(this.state, c.i, c.j, c.t, c.dir, c.rk);
     else if (c.kind === 'fixture') changed = placeFixture(this.state, c.fixture);
+    else if (c.kind === 'drywall') changed = toggleDrywall(this.state, c.edge);
     else if (c.kind === 'erase') changed = this.removeRef(c.target);
     if (!changed) { this.undoStack.pop(); return; }
     // structural check: anything that lost its support breaks off and falls
@@ -105,15 +110,13 @@ class App {
 
   onHover(c) {
     const el = $('sel-info');
-    if (!c) {
-      el.textContent = this.tool ? 'Hover a viewport to preview placement.' : 'Pick a piece from the palette, then hover a viewport.';
-      return;
-    }
-    if (c.kind === 'floor') el.textContent = `Floor module at cell (${c.i}, ${c.j}) — ${c.ok ? 'valid: snaps to the grid beside existing floor' : 'invalid: must touch an existing floor'}`;
-    else if (c.kind === 'wall') el.textContent = `${WALL_PIECES[c.type].name} on ${c.edge.o === 'H' ? 'east–west' : 'north–south'} edge (${c.edge.i}, ${c.edge.j}) — ${c.ok ? 'valid: snaps to floor edge' : 'invalid: needs a floor beside it'}`;
-    else if (c.kind === 'roof') el.textContent = `${ROOF_KINDS[c.rk].name} at (${c.i}, ${c.j}), tier ${c.t}, sloping up ${DIR_NAMES[c.dir]} — ${c.ok ? 'valid: supported' : 'invalid: needs a wall below its low edge or an adjacent panel'}`;
-    else if (c.kind === 'fixture') el.textContent = `${FIXTURES[c.fixture.kind].name} — ${c.ok ? 'valid spot' : 'invalid: needs a ' + (FIXTURES[c.fixture.kind].host === 'wall' ? 'plain wall panel here' : FIXTURES[c.fixture.kind].host === 'roof' ? 'sloped roof panel here' : 'floor module here')}`;
-    else if (c.kind === 'erase') el.textContent = `Remove ${c.target.kind === 'fixture' ? FIXTURES[c.target.ref.kind].name : c.target.kind}`;
+    if (!c) { el.textContent = ''; return; }
+    if (c.kind === 'floor') el.textContent = c.ok ? '· valid spot' : '· must touch an existing floor';
+    else if (c.kind === 'wall') el.textContent = c.ok ? `· ${WALL_PIECES[c.type].name} snaps here` : '· needs a floor beside it';
+    else if (c.kind === 'roof') el.textContent = c.ok ? `· tier ${c.t}, sloping up ${DIR_NAMES[c.dir]}` : '· needs a wall below its low edge or an adjacent panel';
+    else if (c.kind === 'fixture') el.textContent = c.ok ? `· ${FIXTURES[c.fixture.kind].name} fits here` : `· needs a ${FIXTURES[c.fixture.kind].host === 'wall' ? 'plain wall panel' : FIXTURES[c.fixture.kind].host === 'roof' ? 'sloped roof panel' : 'floor module'}`;
+    else if (c.kind === 'drywall') el.textContent = c.ok ? (c.on ? '· click to remove drywall' : '· click to add drywall') : '· click a wall';
+    else if (c.kind === 'erase') el.textContent = `· remove ${c.target.kind === 'fixture' ? FIXTURES[c.target.ref.kind].name : c.target.kind}`;
     $('status-pos').textContent = c.i !== undefined ? `cell ${c.i}, ${c.j}` : '';
   }
 
@@ -190,7 +193,8 @@ class App {
       this.state = emptyState();
       this.refresh();
     });
-    $('btn-demo').addEventListener('click', () => { this.pushUndo(); this.state = demoShed(); this.refresh(); });
+    $('btn-demo').addEventListener('click', () => { this.pushUndo(); this.state = demoShed(); this.refresh(); this.ed2d.fit(); });
+    $('btn-fit2d').addEventListener('click', () => this.ed2d.fit());
     $('btn-undo').addEventListener('click', () => this.undo());
     $('btn-report').addEventListener('click', () => this.openReport());
     $('btn-close-report').addEventListener('click', () => { $('report-overlay').hidden = true; });
@@ -221,6 +225,7 @@ class App {
         this.setTool(this.tool);
       }
       if (e.key.toLowerCase() === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
+      if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey) this.ed2d.fit();
       for (const grp of PALETTE) {
         const piece = grp.items.find(p => p.key === e.key);
         if (piece) this.setTool(piece.id);
@@ -229,4 +234,4 @@ class App {
   }
 }
 
-new App();
+window.__app = new App(); // console/debug handle

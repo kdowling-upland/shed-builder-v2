@@ -108,7 +108,7 @@ function wallRuns(state) {
   for (const r of runs) {
     r.lenFt = r.walls.length * CELL;
     r.openings = r.walls
-      .map((w, idx) => ({ type: w.type, module: idx, spec: WALL_PIECES[w.type] }))
+      .map((w, idx) => ({ type: w.type, module: idx, spec: WALL_PIECES[w.type] || WALL_PIECES.solid }))
       .filter(x => x.spec.cls !== 'solid');
   }
   return runs;
@@ -729,6 +729,41 @@ export function buildReport(state, opts = {}) {
     for (const it of plumb.items) addItem(it.sku, it.qty, 'Plumbing');
   }
 
+  // ---------------- interior finish (drywall) ----------------
+  const drywalled = Object.values(state.walls).filter(w => w.drywall);
+  if (drywalled.length) {
+    const ph = phase('Interior finish');
+    const dwSheets = drywalled.length; // one 4×8 sheet per wall panel
+    const screws = dwSheets * 32;
+    const screwBoxes = Math.max(1, Math.ceil(screws / 250));
+    const pails = Math.max(1, Math.ceil(dwSheets / 12));
+    const tapeRolls = Math.max(1, Math.ceil(dwSheets / 16));
+    addItem('drywallSheet', Math.ceil(dwSheets * waste), 'Interior finish');
+    addItem('dwScrews', screwBoxes, 'Interior finish');
+    addItem('jointCompound', pails, 'Interior finish');
+    addItem('dwTape', tapeRolls, 'Interior finish');
+    ph.steps.push({
+      title: `Hang drywall on ${dwSheets} wall panel${dwSheets > 1 ? 's' : ''}`,
+      minutes: 20 * dwSheets,
+      detail: [
+        'Only after the electrical/plumbing rough-in has been inspected (where required) — covering unapproved work is the classic re-do.',
+        `Hang ${dwSheets} sheets of 1/2″ drywall vertically on the finished walls, 32 screws per sheet (every 12″ on every stud) — ${screws} screws.`,
+        'Cut outlet/switch box openings with a spiral saw or keyhole saw before lifting each sheet.',
+      ],
+      cuts: ['1/2″ drywall → cutouts at each electrical box; rip closers at corners'],
+      tools: ['drywall screw gun', 'utility knife', 'T-square', 'keyhole saw'],
+    });
+    ph.steps.push({
+      title: 'Tape & finish',
+      minutes: 15 * dwSheets + 60,
+      detail: [
+        `Tape every joint and inside corner (${tapeRolls} roll${tapeRolls > 1 ? 's' : ''}), then three coats of compound (${pails} pail${pails > 1 ? 's' : ''}), sanding between coats.`,
+        'For a shed, a "level 2" finish (tape coated, screws spotted) is usually plenty.',
+      ],
+      tools: ['6″ and 10″ taping knives', 'mud pan', 'sanding block'],
+    });
+  }
+
   // ---------------- PHASE 7 — doors, windows, trim ----------------
   {
     const ph = phase('Doors, windows & finishing');
@@ -827,7 +862,8 @@ export function buildReport(state, opts = {}) {
 
   // ---------------- cost rollup ----------------
   const catOrder = ['Foundation & floor', 'Wall framing', 'Sheathing', 'Roofing',
-    'Doors & windows', 'Electrical', 'Plumbing', 'Fasteners & hardware', 'Trim & finish'];
+    'Doors & windows', 'Electrical', 'Plumbing', 'Interior finish',
+    'Fasteners & hardware', 'Trim & finish'];
   const categories = catOrder
     .map(name => {
       const items = supply.filter(s => s.category === name);
@@ -860,6 +896,7 @@ export function buildReport(state, opts = {}) {
       any: fixtures.some(f => FIXTURES[f.kind].sys === 'plumb'),
       sinks: fixtures.filter(f => f.kind === 'sink').length,
     },
+    hasDrywall: drywalled.length > 0,
   };
   const code = runCodeChecks(codeCtx, regionId);
 

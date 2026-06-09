@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import {
   emptyState, demoShed, placeFloor, placeWall, placeRoof, placeFixture,
   canPlaceFloor, canPlaceWall, canPlaceRoof, canPlaceFixture,
-  edgeForSide, bestRoofTier, removeWall,
+  edgeForSide, bestRoofTier, removeWall, toggleDrywall, deserialize,
   perimeterEdges, gableTriangles, bounds,
   computeSupport, collapseUnsupported,
 } from '../js/store.js';
@@ -72,6 +72,41 @@ test('fixtures: walls host devices, plain panels only', () => {
   assert.ok(!canPlaceFixture(s, { kind: 'outlet', o: 'H', i: 0, j: 1 }), 'no outlet on a door wall');
   assert.ok(canPlaceFixture(s, { kind: 'light', i: 0, j: 0 }));
   assert.ok(!canPlaceFixture(s, { kind: 'light', i: 3, j: 3 }), 'light needs a floor cell');
+});
+
+test('v1 saved designs migrate cleanly (door/window wall types)', () => {
+  const v1 = JSON.stringify({
+    floors: { '0,0': { i: 0, j: 0 } },
+    walls: {
+      'H,0,0': { o: 'H', i: 0, j: 0, type: 'door' },
+      'H,0,1': { o: 'H', i: 0, j: 1, type: 'window' },
+      'V,0,0': { o: 'V', i: 0, j: 0, type: 'bogus' },
+    },
+    roofs: { '0,0,0': { i: 0, j: 0, t: 0, dir: 1 } },
+  });
+  const s = deserialize(v1);
+  assert.equal(s.walls['H,0,0'].type, 'door36');
+  assert.equal(s.walls['H,0,1'].type, 'window36');
+  assert.equal(s.walls['V,0,0'].type, 'solid');
+  assert.equal(s.roofs['0,0,0'].kind, 'r45');
+  assert.deepEqual(s.fixtures, {});
+  const r = buildReport(s, {});
+  assert.ok(r.ok, 'migrated state must produce a report');
+});
+
+test('drywall toggles per wall and reaches the report', () => {
+  const s = emptyState();
+  placeFloor(s, 0, 0);
+  placeWall(s, edgeForSide(0, 0, 0), 'solid');
+  assert.ok(toggleDrywall(s, edgeForSide(0, 0, 0)));
+  assert.ok(s.walls['H,0,0'].drywall);
+  placeFixture(s, { kind: 'panel', o: 'H', i: 0, j: 0 });
+  const r = buildReport(s, {});
+  assert.ok(r.categories.some(c => c.name === 'Interior finish'));
+  assert.ok(r.supply.some(x => x.sku === 'drywallSheet'));
+  assert.ok(r.code.findings.some(f => /Cover inspection/.test(f.title)), 'warns about covering rough-in');
+  assert.ok(toggleDrywall(s, edgeForSide(0, 0, 0)));
+  assert.ok(!s.walls['H,0,0'].drywall, 'second click removes it');
 });
 
 console.log('store.js — structural support physics');

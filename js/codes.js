@@ -109,6 +109,12 @@ export function runCodeChecks(ctx, regionId = 'irc') {
       'The feeder from the house must be buried 24″ deep (direct-burial UF-B) or 18″ in PVC conduit; call 811 before digging. Most jurisdictions require an electrical permit + inspection for this.');
   }
 
+  // cover inspection before drywall
+  if (ctx.hasDrywall && (ctx.elec.any || ctx.plumb.any)) {
+    add('warn', 'IRC R109.1.2', 'Cover inspection',
+      'Drywall covers wiring/plumbing — where permits apply, the rough-in must be inspected and approved before the walls are closed up.');
+  }
+
   // plumbing
   if (ctx.plumb.any) {
     if (ctx.plumb.sinks > 0) {
